@@ -11,6 +11,8 @@ html[data-window="pill"] body, html[data-window="pill-debug"] body {
   display: grid;
   place-items: center;
 }
+.pill-shapes { position: relative; width: 128px; height: 32px; }
+.pill-shapes > .recording-pill { position: absolute; inset: 0; }
 .recording-pill {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
@@ -24,7 +26,7 @@ html[data-window="pill"] body, html[data-window="pill-debug"] body {
   background: #000;
   color: #fff;
 }
-.recording-pill.processing { display: flex; justify-content: center; width: 32px; padding: 0; }
+.pill-shapes > .recording-pill.processing { left: 48px; right: auto; display: flex; justify-content: center; width: 32px; padding: 0; }
 .recording-pill.processing > svg { width: 20px; height: 20px; }
 .recording-pill button { justify-self: center; width: 20px; height: 20px; border-radius: 50%; padding: 0; translate: none; }
 .recording-pill button svg { width: 14px; height: 14px; }
