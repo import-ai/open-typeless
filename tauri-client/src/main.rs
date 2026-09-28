@@ -108,6 +108,7 @@ fn main() {
             stop_recording,
             cancel_recording,
             dismiss_pill,
+            debug_pill_preview,
             transcribe_file,
             set_server_url,
             get_settings,
@@ -345,6 +346,40 @@ fn hide_pill(app: &AppHandle) {
 #[tauri::command]
 fn dismiss_pill(app: AppHandle) {
     hide_pill(&app);
+}
+
+// Exercise the real native window lifecycle without starting a microphone or ASR.
+#[tauri::command]
+fn debug_pill_preview(app: AppHandle, mode: String) -> Result<String, String> {
+    if app
+        .state::<AppState>()
+        .recorder
+        .lock()
+        .map_err(|e| e.to_string())?
+        .session
+        .is_some()
+    {
+        return Err("请先结束录音".into());
+    }
+    let window = app.get_webview_window("pill").ok_or("找不到 pill 窗口")?;
+    match mode.as_str() {
+        "disconnected" | "unready" | "ready" | "processing" => {
+            app.emit_to("pill", "pill-preview", &mode)
+                .map_err(|e| e.to_string())?;
+            window.show().map_err(|e| e.to_string())?;
+        }
+        "hidden" => window.hide().map_err(|e| e.to_string())?,
+        _ => return Err("未知预览状态".into()),
+    }
+    // Keep the controls usable while the always-on-top overlay is visible.
+    if let Some(main) = app.get_webview_window("main") {
+        main.set_focus().map_err(|e| e.to_string())?;
+    }
+    let size = window.inner_size().map_err(|e| e.to_string())?;
+    let logical = size.to_logical::<f64>(window.scale_factor().map_err(|e| e.to_string())?);
+    let status = format!("{}×{} · {}", logical.width, logical.height, mode);
+    eprintln!("pill preview: {status}");
+    Ok(status)
 }
 
 #[tauri::command]

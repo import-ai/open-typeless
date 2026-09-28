@@ -5,7 +5,12 @@ html[data-window="pill"] body, html[data-window="pill-debug"] body {
   margin: 0;
   overflow: hidden;
 }
-.pill-stage { width: 128px; height: 32px; display: grid; place-items: center; }
+.pill-stage {
+  width: 128px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+}
 .recording-pill {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);

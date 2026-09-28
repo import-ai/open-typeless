@@ -19,5 +19,6 @@ export function PillDebug() {
       <p className="pill-debug-label">{label}</p>
       <div className="pill-stage"><RecordingPill state={state} level={level} /></div>
     </div>)}
+
   </main>
 }

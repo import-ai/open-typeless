@@ -44,9 +44,9 @@ npm run tauri build  # 构建桌面程序（自动运行前端构建）
 ```
 
 浏览器访问 `http://localhost:5173/?view=pill-debug` 可单独调整 pill。
-桌面窗口按 Tauri window label 选择 React 界面，预览参数仅用于浏览器。
-正式 pill 与 debug 共用 `frontend/src/components/recording-pill.tsx`；
-主窗口不会渲染这些预览。当前 pill 尺寸保留现有值，最终外观按 PRD 结对验收。
+
+主窗口的“开发者选项”可显示、隐藏原生 pill，并切换未连接、未就绪、已就绪、识别中四态。
+点击状态会直接显示对应外观；该预览不启用麦克风、不调用 ASR，录音和识别期间不可用。
 
 新增 shadcn 组件：在 `tauri-client/` 运行 `npx shadcn@latest add <组件名>`。
 组件源码保存在 `frontend/src/components/ui/`。

@@ -21,4 +21,5 @@ export const commands = {
   transcribe: (path: string) => invoke<string>('transcribe_file', { path }),
   shortcut: (shortcut: string) => invoke<void>('set_shortcut', { shortcut }),
   dismissPill: () => invoke<void>('dismiss_pill'),
+  previewPill: (mode: PillState | 'hidden') => invoke<string>('debug_pill_preview', { mode }),
 }

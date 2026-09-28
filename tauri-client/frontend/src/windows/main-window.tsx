@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Mic, Square } from 'lucide-react'
+import { DeveloperOptions } from '@/components/developer-options'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -135,5 +136,6 @@ export function MainWindow() {
         <Button variant="outline" disabled={!loaded || saving || !shortcut.trim()} onClick={() => { void saveShortcut() }}>{saving ? '保存中…' : '保存'}</Button>
       </div>
     </section>
+    <DeveloperOptions disabled={phase !== 'idle'} />
   </main>
 }
