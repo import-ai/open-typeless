@@ -1,3 +1,5 @@
+mod right_command;
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -79,6 +81,7 @@ struct Recognition {
 struct Settings {
     shortcut: String,
     server_url: String,
+    shortcut_warning: Option<String>,
 }
 
 /// Remove the leading capture delay while retaining a short amount of context
@@ -145,7 +148,11 @@ fn main() {
             shortcut: Mutex::new(default_shortcut_name().into()),
         })
         .setup(|app| {
-            bind_shortcut(app.handle(), parse_shortcut(default_shortcut_name())?)?;
+            #[cfg(target_os = "macos")]
+            if let Err(error) = right_command::install(app.handle()) {
+                eprintln!("{error}");
+            }
+            bind_named_shortcut(app.handle(), default_shortcut_name())?;
             position_pill(app.handle())?;
             if std::env::var_os("OPEN_TYPELESS_PILL_DEBUG").is_some() {
                 if let Some(window) = app.get_webview_window("pill-debug") {
@@ -171,9 +178,37 @@ fn main() {
 
 fn default_shortcut_name() -> &'static str {
     if cfg!(target_os = "macos") {
-        "Command+Shift+Space"
+        "RCommand"
     } else {
         "Control+Shift+Space"
+    }
+}
+
+fn is_right_command(name: &str) -> bool {
+    cfg!(target_os = "macos")
+        && matches!(
+            name.trim().to_ascii_uppercase().as_str(),
+            "RCOMMAND" | "RIGHTCOMMAND"
+        )
+}
+
+fn bind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
+    if is_right_command(name) {
+        right_command::enable(true);
+        Ok(())
+    } else {
+        bind_shortcut(app, parse_shortcut(name)?)
+    }
+}
+
+fn unbind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
+    if is_right_command(name) {
+        right_command::enable(false);
+        Ok(())
+    } else {
+        app.global_shortcut()
+            .unregister(parse_shortcut(name)?)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -467,7 +502,7 @@ fn pill_position(origin: (i32, i32), size: (u32, u32), scale: f64) -> (i32, i32)
     let height = (32.0 * scale).round() as i32;
     (
         origin.0 + (size.0 as i32 - width) / 2,
-        origin.1 + (size.1 as i32 - height - (256.0 * scale).round() as i32).max(0),
+        origin.1 + (size.1 as i32 - height - (128.0 * scale).round() as i32).max(0),
     )
 }
 fn position_pill(app: &AppHandle) -> Result<(), String> {
@@ -615,14 +650,14 @@ mod tests {
     }
     #[test]
     fn positions_pill_in_screen_coordinates_at_each_scale() {
-        assert_eq!(super::pill_position((0, 0), (1920, 1080), 1.0), (896, 792));
+        assert_eq!(super::pill_position((0, 0), (1920, 1080), 1.0), (896, 920));
         assert_eq!(
             super::pill_position((0, 0), (2880, 1800), 2.0),
-            (1312, 1224)
+            (1312, 1480)
         );
         assert_eq!(
             super::pill_position((-1920, -100), (1920, 1080), 1.0),
-            (-1024, 692)
+            (-1024, 820)
         );
     }
 
@@ -843,8 +878,17 @@ fn set_server_url(state: State<'_, AppState>, url: String) -> Result<(), String>
 
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
+    let shortcut = state.shortcut.lock().map_err(|e| e.to_string())?.clone();
+    let shortcut_warning = None;
+    #[cfg(target_os = "macos")]
+    let shortcut_warning = if is_right_command(&shortcut) {
+        right_command::warning()
+    } else {
+        shortcut_warning
+    };
     Ok(Settings {
-        shortcut: state.shortcut.lock().map_err(|e| e.to_string())?.clone(),
+        shortcut_warning,
+        shortcut,
         server_url: state.server_url.lock().map_err(|e| e.to_string())?.clone(),
     })
 }
@@ -859,20 +903,16 @@ fn set_shortcut(
     if shortcut.is_empty() {
         return Err("快捷键不能为空".into());
     }
-    let new_shortcut = parse_shortcut(&shortcut)?;
-    if new_shortcut == parse_shortcut("Escape")? {
+    if !is_right_command(&shortcut) && parse_shortcut(&shortcut)? == parse_shortcut("Escape")? {
         return Err("Esc 用于取消语音输入，请设置其他快捷键".into());
     }
     let mut current = state.shortcut.lock().map_err(|e| e.to_string())?;
     if *current == shortcut {
         return Ok(());
     }
-    let old = parse_shortcut(&current)?;
-    app.global_shortcut()
-        .unregister(old)
-        .map_err(|e| e.to_string())?;
-    if let Err(error) = bind_shortcut(&app, new_shortcut) {
-        let _ = bind_shortcut(&app, old);
+    unbind_named_shortcut(&app, &current)?;
+    if let Err(error) = bind_named_shortcut(&app, &shortcut) {
+        let _ = bind_named_shortcut(&app, &current);
         return Err(error);
     }
     *current = shortcut;

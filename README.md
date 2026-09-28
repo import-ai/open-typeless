@@ -50,17 +50,19 @@ npm run tauri build  # 构建桌面程序（自动运行前端构建）
 原生外观回归：检查“识别中 → 未连接”和“识别中 → 已就绪 → 未连接”，胶囊左右圆角及底边应完整。
 胶囊和识别圆形保留各自固定尺寸的元素，通过透明度切换；避免复用同一个元素改变尺寸造成 macOS 裁切残留。
 
-Pill 首次显示在主屏幕水平中央，底边距离屏幕底部 256 个逻辑像素。波形、右侧等待图标和识别中的圆形均可拖动，光标显示抓手；拖动位置保留至退出应用。
+Pill 首次显示在主屏幕水平中央，底边距离屏幕底部 128 个逻辑像素。波形、右侧等待图标和识别中的圆形均可拖动，光标显示抓手；拖动位置保留至退出应用。
 macOS 上 pill 接受首次鼠标点击且不接管键盘焦点。Pill 显示期间按 Esc 取消当前录音或识别，隐藏后释放 Esc；取消会终止客户端请求并禁止旧会话结果粘贴。
 
 新增 shadcn 组件：在 `tauri-client/` 运行 `npx shadcn@latest add <组件名>`。
 组件源码保存在 `frontend/src/components/ui/`。
 集成依据和目录约定见 [前端开发说明](docs/frontend.md)。
 
-客户端默认注册 `Command+Shift+Space`（macOS）或 `Control+Shift+Space`（Windows）全局热键。
-设置界面可以修改快捷键，保存后立即生效。当前 Tauri 的 `global-hotkey` 库要求快捷键包含一个主键，
-因此暂不支持只有右 Command/右 Control 的单修饰键热键。
-第一次按下开始采集麦克风，再次按下停止并生成临时 WAV，上传到 Business Server，收到 `raw_text` 后写入
+macOS 默认使用 `RCommand`：单独按下并松开右 Command 开始录音，再次单独松开停止并识别。
+按住期间使用其他按键、修饰键或点击鼠标会取消本次快捷键触发，因此右 Command+C 等组合不触发录音。
+通过原生 AppKit 本地及全局事件监听实现，需辅助功能权限；未授权时界面显示提示，授权后重启应用。
+Windows 默认仍为 `Control+Shift+Space`，暂不支持单独右 Control。
+设置界面可输入 `RCommand` 或常规组合键，保存后立即生效（设置暂不跨重启保存）。
+停止录音后生成临时 WAV，上传到 Business Server，收到 `raw_text` 后写入
 剪贴板并模拟 `Ctrl/Command+V` 粘贴到当前窗口。服务端地址默认是
 `http://127.0.0.1:8080`，可在 Rust 状态中通过 `set_server_url` 调整。
 

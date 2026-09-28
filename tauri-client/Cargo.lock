@@ -2685,9 +2685,12 @@ name = "open-typeless-client"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "block2 0.6.2",
  "cpal",
  "enigo",
  "hound",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

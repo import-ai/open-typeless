@@ -13,7 +13,7 @@ export const windowLabel = desktop
   : new URLSearchParams(location.search).get('view') ?? 'main'
 
 export interface RecordingFile { path: string; run_id: number }
-export interface Settings { shortcut: string; server_url: string }
+export interface Settings { shortcut: string; server_url: string; shortcut_warning: string | null }
 export const commands = {
   settings: () => invoke<Settings>('get_settings'),
   start: () => invoke<void>('start_recording'),

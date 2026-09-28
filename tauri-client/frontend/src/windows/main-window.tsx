@@ -32,6 +32,7 @@ export function MainWindow() {
       setShortcut(settings.shortcut)
       setSavedShortcut(settings.shortcut)
       setLoaded(true)
+      if (settings.shortcut_warning) setStatus(settings.shortcut_warning)
     }).catch(error => { if (active) setStatus(String(error)) })
     return () => { active = false }
   }, [])
@@ -107,7 +108,8 @@ export function MainWindow() {
       const value = shortcut.trim()
       await commands.shortcut(value)
       setSavedShortcut(value)
-      setStatus('快捷键已更新')
+      const settings = await commands.settings()
+      setStatus(settings.shortcut_warning ?? '快捷键已更新')
     } catch (error) { setStatus(String(error)) }
     finally { setSaving(false) }
   }
