@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "OpenTypeless",
+  "productName": "Open Typeless",
   "version": "0.1.0",
   "identifier": "com.opentypeless.client",
   "build": {
@@ -15,7 +15,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "OpenTypeless",
+        "title": "Open Typeless",
         "width": 420,
         "height": 680,
         "resizable": false
@@ -24,7 +24,7 @@
         "label": "pill",
         "acceptFirstMouse": true,
         "focusable": false,
-        "title": "OpenTypeless microphone",
+        "title": "Open Typeless microphone",
         "width": 128,
         "height": 32,
         "decorations": false,
@@ -37,7 +37,7 @@
       },
       {
         "label": "pill-debug",
-        "title": "OpenTypeless pill states",
+        "title": "Open Typeless pill states",
         "width": 300,
         "height": 384,
         "decorations": false,

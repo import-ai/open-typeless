@@ -27,6 +27,7 @@ struct AppState {
     next_run: AtomicU64,
     server_url: Mutex<String>,
     shortcut: Mutex<String>,
+    shortcut_capturing: Mutex<bool>,
 }
 const CANCELLED: &str = "已取消本次识别";
 
@@ -146,6 +147,7 @@ fn main() {
             next_run: AtomicU64::new(1),
             server_url: Mutex::new("http://127.0.0.1:8080".into()),
             shortcut: Mutex::new(default_shortcut_name().into()),
+            shortcut_capturing: Mutex::new(false),
         })
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -161,6 +163,16 @@ fn main() {
             }
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if window.label() == "main"
+                && matches!(event, tauri::WindowEvent::Focused(false) | tauri::WindowEvent::Destroyed)
+            {
+                let app = window.app_handle();
+                if let Err(error) = set_shortcut_capture(app.clone(), app.state(), false) {
+                    eprintln!("恢复快捷键失败: {error}");
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             start_recording,
             stop_recording,
@@ -170,10 +182,11 @@ fn main() {
             transcribe_file,
             set_server_url,
             get_settings,
-            set_shortcut
+            set_shortcut,
+            set_shortcut_capture
         ])
         .run(tauri::generate_context!())
-        .expect("error while running OpenTypeless");
+        .expect("error while running Open Typeless");
 }
 
 fn default_shortcut_name() -> &'static str {
@@ -893,6 +906,28 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     })
 }
 
+// Release the registered shortcut so the webview can receive the same keys
+// while recording a replacement. Restore it on completion or loss of focus.
+#[tauri::command]
+fn set_shortcut_capture(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    capturing: bool,
+) -> Result<(), String> {
+    let current = state.shortcut.lock().map_err(|e| e.to_string())?;
+    let mut active = state.shortcut_capturing.lock().map_err(|e| e.to_string())?;
+    if *active == capturing {
+        return Ok(());
+    }
+    if capturing {
+        unbind_named_shortcut(&app, &current)?;
+    } else {
+        bind_named_shortcut(&app, &current)?;
+    }
+    *active = capturing;
+    Ok(())
+}
+
 #[tauri::command]
 fn set_shortcut(
     app: AppHandle,
@@ -907,6 +942,9 @@ fn set_shortcut(
         return Err("Esc 用于取消语音输入，请设置其他快捷键".into());
     }
     let mut current = state.shortcut.lock().map_err(|e| e.to_string())?;
+    if *state.shortcut_capturing.lock().map_err(|e| e.to_string())? {
+        return Err("请先完成快捷键录入".into());
+    }
     if *current == shortcut {
         return Ok(());
     }

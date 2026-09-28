@@ -1,4 +1,4 @@
-# OpenTypeless
+# Open Typeless
 Open Typeless, deploy once, using everywhere.
 
 ## 本地第一阶段
