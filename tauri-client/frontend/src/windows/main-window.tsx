@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useTauriEvent } from '@/hooks/use-tauri-event'
-import { commands, desktop, micLabels, type MicState } from '@/lib/desktop'
+import { commands, desktop, micLabels, type MicState, type RecordingFile } from '@/lib/desktop'
 
 type Phase = 'idle' | 'starting' | 'recording' | 'processing'
 
@@ -14,6 +14,8 @@ export function MainWindow() {
   const [phase, setPhase] = useState<Phase>('idle')
   const phaseRef = useRef<Phase>('idle')
   const busy = useRef(false)
+  const epoch = useRef(0)
+  const pillVisible = useRef(false)
   const [mic, setMic] = useState<MicState>('disconnected')
   const [status, setStatus] = useState(desktop ? '就绪' : '界面预览 · 请在桌面应用中录音')
   const [shortcut, setShortcut] = useState('')
@@ -22,9 +24,6 @@ export function MainWindow() {
   const [loaded, setLoaded] = useState(false)
   const changePhase = (next: Phase) => { phaseRef.current = next; setPhase(next) }
   const reset = () => { changePhase('idle'); setMic('disconnected') }
-  const dismiss = async () => {
-    try { await commands.dismissPill() } catch (error) { console.error(error) }
-  }
   useEffect(() => {
     if (!desktop) return
     let active = true
@@ -39,60 +38,68 @@ export function MainWindow() {
 
   async function start() {
     if (busy.current || phaseRef.current !== 'idle') return
+    const current = ++epoch.current
     busy.current = true
     changePhase('starting')
     setMic('unready')
     setStatus('等待麦克风输出…')
     try {
       await commands.start()
+      if (epoch.current !== current) return
       changePhase('recording')
       setStatus('录音中…')
     } catch (error) {
-      setStatus(String(error))
-      reset()
-      await dismiss()
-    } finally { busy.current = false }
+      if (epoch.current !== current) return
+      setStatus(String(error)); reset()
+    } finally { if (epoch.current === current) busy.current = false }
   }
-  async function transcribe(path: string) {
+  async function transcribe(file: RecordingFile, current: number) {
+    if (epoch.current !== current) return
     changePhase('processing')
     setStatus('正在上传和识别…')
     try {
-      const text = await commands.transcribe(path)
-      setStatus(text || '未识别到文字')
+      const text = await commands.transcribe(file)
+      if (epoch.current === current) setStatus(text || '未识别到文字')
     } catch (error) {
-      setStatus(String(error))
-    } finally { reset(); await dismiss() }
+      if (epoch.current === current) setStatus(String(error))
+    } finally { if (epoch.current === current) reset() }
   }
   async function stop() {
     if (busy.current || phaseRef.current !== 'recording') return
+    const current = epoch.current
     busy.current = true
     changePhase('processing')
-    try { await transcribe(await commands.stop()) }
-    catch (error) { setStatus(String(error)); reset(); await dismiss() }
-    finally { busy.current = false }
+    try { await transcribe(await commands.stop(), current) }
+    catch (error) { if (epoch.current === current) { setStatus(String(error)); reset() } }
+    finally { if (epoch.current === current) busy.current = false }
   }
   async function cancel() {
-    if (busy.current || phaseRef.current !== 'recording') return
-    busy.current = true
-    try { await commands.cancel(); reset(); setStatus('已取消录音') }
+    try { await commands.cancel() }
     catch (error) { setStatus(String(error)) }
-    finally { busy.current = false }
   }
 
   useTauriEvent<MicState>('mic-state', setMic)
-  useTauriEvent('recording-starting', () => {
-    changePhase('starting'); setMic('unready'); setStatus('等待麦克风输出…')
-  })
-  useTauriEvent('recording-started', () => { changePhase('recording'); setStatus('录音中…') })
-  useTauriEvent<string>('recording-stopped', (path) => {
-    if (busy.current) return
-    busy.current = true
-    void transcribe(path).finally(() => { busy.current = false })
+  useTauriEvent('pill-shown', () => { pillVisible.current = true })
+  useTauriEvent('pill-hidden', () => { pillVisible.current = false })
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && pillVisible.current) {
+        event.preventDefault()
+        void commands.cancel().catch(console.error)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [])
+  useTauriEvent('toggle-requested', () => {
+    void (phaseRef.current === 'recording' ? stop() : start())
   })
   useTauriEvent('stop-requested', () => { void stop() })
   useTauriEvent('cancel-requested', () => { void cancel() })
-  useTauriEvent('recording-cancelled', () => { reset(); setStatus('已取消录音') })
-  useTauriEvent<string>('recording-error', (error) => { reset(); setStatus(error); void dismiss() })
+  useTauriEvent('recording-cancelled', () => {
+    // Invalidate every pending start/stop/upload continuation immediately.
+    epoch.current++; busy.current = false; reset(); setStatus('已取消本次识别')
+  })
 
   async function saveShortcut() {
     setSaving(true)

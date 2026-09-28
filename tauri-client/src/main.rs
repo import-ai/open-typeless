@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -15,14 +15,62 @@ struct Recorder {
     session: Option<RecordingSession>,
 }
 struct RecordingSession {
+    run: Arc<TranscriptionRun>,
     stop: mpsc::Sender<()>,
     done: mpsc::Receiver<Result<PathBuf, String>>,
 }
 struct AppState {
     recorder: Mutex<Recorder>,
+    active: Mutex<Option<Arc<TranscriptionRun>>>,
+    next_run: AtomicU64,
     server_url: Mutex<String>,
     shortcut: Mutex<String>,
 }
+const CANCELLED: &str = "已取消本次识别";
+
+struct TranscriptionRun {
+    id: u64,
+    cancelled: AtomicBool,
+    notification: tokio::sync::Notify,
+    capture_stop: Mutex<Option<mpsc::Sender<()>>>,
+}
+impl TranscriptionRun {
+    fn new(id: u64) -> Self {
+        Self {
+            id,
+            cancelled: AtomicBool::new(false),
+            notification: tokio::sync::Notify::new(),
+            capture_stop: Mutex::new(None),
+        }
+    }
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.notification.notify_one();
+        if let Ok(stop) = self.capture_stop.lock() {
+            if let Some(stop) = stop.as_ref() {
+                let _ = stop.send(());
+            }
+        }
+    }
+    fn check(&self) -> Result<(), String> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            Err(CANCELLED.into())
+        } else {
+            Ok(())
+        }
+    }
+    async fn cancellation(&self) {
+        if self.check().is_ok() {
+            self.notification.notified().await;
+        }
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct RecordingFile {
+    path: String,
+    run_id: u64,
+}
+
 #[derive(Deserialize)]
 struct Recognition {
     raw_text: String,
@@ -91,11 +139,14 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState {
             recorder: Mutex::new(Recorder { session: None }),
+            active: Mutex::new(None),
+            next_run: AtomicU64::new(1),
             server_url: Mutex::new("http://127.0.0.1:8080".into()),
             shortcut: Mutex::new(default_shortcut_name().into()),
         })
         .setup(|app| {
             bind_shortcut(app.handle(), parse_shortcut(default_shortcut_name())?)?;
+            position_pill(app.handle())?;
             if std::env::var_os("OPEN_TYPELESS_PILL_DEBUG").is_some() {
                 if let Some(window) = app.get_webview_window("pill-debug") {
                     let _ = window.show();
@@ -139,54 +190,107 @@ fn bind_shortcut(app: &AppHandle, shortcut: Shortcut) -> Result<(), String> {
     app.global_shortcut()
         .on_shortcut(shortcut, move |_app, _shortcut, event| {
             if event.state == ShortcutState::Pressed {
-                if let Err(error) = toggle_recording(&handle) {
-                    eprintln!("recording shortcut failed: {error}");
-                    let _ = handle.emit("recording-error", error);
-                }
+                let _ = handle.emit_to("main", "toggle-requested", ());
             }
         })
         .map_err(|e| e.to_string())
 }
 
-fn toggle_recording(app: &AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let recording = state
-        .recorder
-        .lock()
-        .map_err(|e| e.to_string())?
-        .session
-        .is_some();
-    if recording {
-        app.emit("recording-processing", ())
-            .map_err(|e| e.to_string())?;
-        let path = stop_inner(&state)?;
-        app.emit("recording-stopped", path.to_string_lossy().to_string())
-            .map_err(|e| e.to_string())?;
-    } else {
-        show_pill(app);
-        app.emit("recording-starting", ())
-            .map_err(|e| e.to_string())?;
-        start_inner(&state, app.clone())?;
-        app.emit("recording-started", ())
-            .map_err(|e| e.to_string())?;
+fn with_current_run<T>(
+    active: &Mutex<Option<Arc<TranscriptionRun>>>,
+    run: &TranscriptionRun,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let current = active.lock().map_err(|e| e.to_string())?;
+    if current.as_ref().is_none_or(|current| current.id != run.id) {
+        return Err(CANCELLED.into());
     }
-    Ok(())
+    run.check()?;
+    action()
+}
+fn recording_path(id: u64) -> PathBuf {
+    std::env::temp_dir().join(format!("open-typeless-{}-{}.wav", std::process::id(), id))
+}
+
+async fn finish_run(app: &AppHandle, id: u64) {
+    let finish_app = app.clone();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    if app
+        .run_on_main_thread(move || {
+            let state = finish_app.state::<AppState>();
+            let mut active = state.active.lock().unwrap();
+            if active.as_ref().is_some_and(|run| run.id == id) {
+                *active = None;
+                hide_pill(&finish_app);
+            }
+            let _ = done_tx.send(());
+        })
+        .is_ok()
+    {
+        let _ = done_rx.await;
+    }
 }
 
 #[tauri::command]
-fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    show_pill(&app);
-    app.emit("recording-starting", ())
+async fn start_recording(app: AppHandle) -> Result<(), String> {
+    let run = {
+        let state = app.state::<AppState>();
+        let mut active = state.active.lock().map_err(|e| e.to_string())?;
+        if active.is_some() {
+            return Err("已有录音或识别进行中".into());
+        }
+        let run = Arc::new(TranscriptionRun::new(
+            state.next_run.fetch_add(1, Ordering::SeqCst),
+        ));
+        *active = Some(run.clone());
+        run
+    };
+    let result = async {
+        // Native shortcut registration must run on the UI thread. Never hold
+        // the active-run lock on a worker while waiting for the UI thread.
+        let show_app = app.clone();
+        let show_run = run.clone();
+        let (shown_tx, shown_rx) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let result = with_current_run(&show_app.state::<AppState>().active, &show_run, || {
+                show_pill(&show_app)?;
+                show_app
+                    .emit("recording-starting", ())
+                    .map_err(|e| e.to_string())
+            });
+            let _ = shown_tx.send(result);
+        })
         .map_err(|e| e.to_string())?;
-    start_inner(&state, app)
+        shown_rx.await.map_err(|e| e.to_string())??;
+        let worker_app = app.clone();
+        let worker_run = run.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            start_inner(
+                &worker_app.state::<AppState>(),
+                worker_app.clone(),
+                worker_run,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    .await;
+    if result.is_err() {
+        run.cancel();
+        finish_run(&app, run.id).await;
+    }
+    result
 }
-fn start_inner(state: &AppState, app: AppHandle) -> Result<(), String> {
+fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> Result<(), String> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (capture_ready_tx, capture_ready_rx) = mpsc::channel();
     let (stop_tx, stop_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
+    *run.capture_stop.lock().map_err(|e| e.to_string())? = Some(stop_tx.clone());
+    let capture_run = run.clone();
     std::thread::spawn(move || {
         let result = (|| -> Result<(), String> {
+            capture_run.check()?;
             let host = cpal::default_host();
             let device = match host.default_input_device() {
                 Some(device) => device,
@@ -202,18 +306,25 @@ fn start_inner(state: &AppState, app: AppHandle) -> Result<(), String> {
             let sink = samples.clone();
             let capture_ready_once = Arc::new(AtomicBool::new(false));
             let error_events = app.clone();
+            let error_run = capture_run.clone();
             let err_fn = move |e| {
                 eprintln!("audio input error: {e}");
-                let _ = error_events.emit("mic-state", "disconnected");
+                if error_run.check().is_ok() {
+                    let _ = error_events.emit("mic-state", "disconnected");
+                }
             };
             let stream = match supported.sample_format() {
                 cpal::SampleFormat::I16 => {
                     let ready = capture_ready_tx.clone();
                     let once = capture_ready_once.clone();
                     let events = app.clone();
+                    let callback_run = capture_run.clone();
                     device.build_input_stream(
                         &supported.config(),
                         move |d: &[i16], _| {
+                            if callback_run.check().is_err() {
+                                return;
+                            }
                             let level = d.iter().map(|sample| (*sample as f64).abs()).sum::<f64>()
                                 / (d.len().max(1) as f64)
                                 / 32768.0;
@@ -234,9 +345,13 @@ fn start_inner(state: &AppState, app: AppHandle) -> Result<(), String> {
                     let ready = capture_ready_tx.clone();
                     let once = capture_ready_once.clone();
                     let events = app.clone();
+                    let callback_run = capture_run.clone();
                     device.build_input_stream(
                         &supported.config(),
                         move |d: &[u16], _| {
+                            if callback_run.check().is_err() {
+                                return;
+                            }
                             let level = d
                                 .iter()
                                 .map(|sample| ((*sample as i32 - 32768).abs()) as f64)
@@ -262,9 +377,13 @@ fn start_inner(state: &AppState, app: AppHandle) -> Result<(), String> {
                     let ready = capture_ready_tx.clone();
                     let once = capture_ready_once.clone();
                     let events = app.clone();
+                    let callback_run = capture_run.clone();
                     device.build_input_stream(
                         &supported.config(),
                         move |d: &[f32], _| {
+                            if callback_run.check().is_err() {
+                                return;
+                            }
                             let level = d.iter().map(|sample| sample.abs() as f64).sum::<f64>()
                                 / (d.len().max(1) as f64);
                             let _ = events.emit("mic-level", level.min(1.0));
@@ -285,11 +404,18 @@ fn start_inner(state: &AppState, app: AppHandle) -> Result<(), String> {
                 _ => return Err("不支持的麦克风采样格式".into()),
             }
             .map_err(|e| e.to_string())?;
+            capture_run.check()?;
             let _ = app.emit("mic-state", "unready");
             stream.play().map_err(|e| e.to_string())?;
-            capture_ready_rx
-                .recv_timeout(Duration::from_secs(3))
-                .map_err(|_| "麦克风未及时就绪，请检查麦克风权限或输入设备".to_string())?;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                capture_run.check()?;
+                match capture_ready_rx.recv_timeout(Duration::from_millis(20)) {
+                    Ok(()) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
+                    _ => return Err("麦克风未及时就绪，请检查麦克风权限和输入设备".into()),
+                }
+            }
             ready_tx.send(Ok(())).map_err(|e| e.to_string())?;
             stop_rx.recv().map_err(|e| e.to_string())?;
             // The input device can have one callback already queued when the
@@ -297,10 +423,10 @@ fn start_inner(state: &AppState, app: AppHandle) -> Result<(), String> {
             // so the tail of the utterance reaches `samples` before closing.
             std::thread::sleep(Duration::from_millis(200));
             drop(stream);
+            capture_run.check()?;
             let captured = samples.lock().map_err(|e| e.to_string())?.clone();
             let samples = trim_leading_silence(&captured, channels as usize, sample_rate)?;
-            let path =
-                std::env::temp_dir().join(format!("open-typeless-{}.wav", std::process::id()));
+            let path = recording_path(capture_run.id);
             let spec = hound::WavSpec {
                 channels,
                 sample_rate,
@@ -312,7 +438,10 @@ fn start_inner(state: &AppState, app: AppHandle) -> Result<(), String> {
                 writer.write_sample(sample).map_err(|e| e.to_string())?;
             }
             writer.finalize().map_err(|e| e.to_string())?;
-            done_tx.send(Ok(path)).map_err(|e| e.to_string())?;
+            if capture_run.check().is_err() || done_tx.send(Ok(path.clone())).is_err() {
+                let _ = std::fs::remove_file(path);
+                return Err(CANCELLED.into());
+            }
             Ok(())
         })();
         if let Err(error) = result {
@@ -323,24 +452,67 @@ fn start_inner(state: &AppState, app: AppHandle) -> Result<(), String> {
     ready_rx
         .recv_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())??;
-    state.recorder.lock().map_err(|e| e.to_string())?.session = Some(RecordingSession {
+    let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
+    run.check()?;
+    recorder.session = Some(RecordingSession {
+        run,
         stop: stop_tx,
         done: done_rx,
     });
     Ok(())
 }
 
-fn show_pill(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("pill") {
-        let _ = window.show();
-    }
+fn pill_position(origin: (i32, i32), size: (u32, u32), scale: f64) -> (i32, i32) {
+    let width = (128.0 * scale).round() as i32;
+    let height = (32.0 * scale).round() as i32;
+    (
+        origin.0 + (size.0 as i32 - width) / 2,
+        origin.1 + (size.1 as i32 - height - (256.0 * scale).round() as i32).max(0),
+    )
 }
-
+fn position_pill(app: &AppHandle) -> Result<(), String> {
+    if let (Some(window), Some(monitor)) = (
+        app.get_webview_window("pill"),
+        app.primary_monitor().map_err(|e| e.to_string())?,
+    ) {
+        let (x, y) = pill_position(
+            (monitor.position().x, monitor.position().y),
+            (monitor.size().width, monitor.size().height),
+            monitor.scale_factor(),
+        );
+        window
+            .set_position(tauri::PhysicalPosition::new(x, y))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+fn show_pill(app: &AppHandle) -> Result<(), String> {
+    let escape = parse_shortcut("Escape")?;
+    if !app.global_shortcut().is_registered(escape) {
+        let handle = app.clone();
+        app.global_shortcut()
+            .on_shortcut(escape, move |_, _, event| {
+                if event.state == ShortcutState::Pressed {
+                    let _ = cancel_active(&handle);
+                }
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(window) = app.get_webview_window("pill") {
+        window.show().map_err(|e| e.to_string())?;
+    }
+    app.emit("pill-shown", ()).map_err(|e| e.to_string())?;
+    Ok(())
+}
 fn hide_pill(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("pill") {
         let _ = window.hide();
     }
+    if let Ok(escape) = parse_shortcut("Escape") {
+        let _ = app.global_shortcut().unregister(escape);
+    }
     let _ = app.emit("mic-state", "disconnected");
+    let _ = app.emit("pill-hidden", ());
 }
 
 #[tauri::command]
@@ -353,22 +525,21 @@ fn dismiss_pill(app: AppHandle) {
 fn debug_pill_preview(app: AppHandle, mode: String) -> Result<String, String> {
     if app
         .state::<AppState>()
-        .recorder
+        .active
         .lock()
         .map_err(|e| e.to_string())?
-        .session
         .is_some()
     {
-        return Err("请先结束录音".into());
+        return Err("请先结束录音和识别".into());
     }
     let window = app.get_webview_window("pill").ok_or("找不到 pill 窗口")?;
     match mode.as_str() {
         "disconnected" | "unready" | "ready" | "processing" => {
             app.emit_to("pill", "pill-preview", &mode)
                 .map_err(|e| e.to_string())?;
-            window.show().map_err(|e| e.to_string())?;
+            show_pill(&app)?;
         }
-        "hidden" => window.hide().map_err(|e| e.to_string())?,
+        "hidden" => hide_pill(&app),
         _ => return Err("未知预览状态".into()),
     }
     // Keep the controls usable while the always-on-top overlay is visible.
@@ -382,14 +553,28 @@ fn debug_pill_preview(app: AppHandle, mode: String) -> Result<String, String> {
     Ok(status)
 }
 
-#[tauri::command]
-fn cancel_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    if let Ok(path) = stop_inner(&state) {
-        let _ = std::fs::remove_file(path);
+fn cancel_active(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut active = state.active.lock().map_err(|e| e.to_string())?;
+    if let Some(run) = active.take() {
+        run.cancel();
+        let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
+        if recorder
+            .session
+            .as_ref()
+            .is_some_and(|session| session.run.id == run.id)
+        {
+            recorder.session.take();
+        }
+        let _ = std::fs::remove_file(recording_path(run.id));
     }
-    hide_pill(&app);
+    hide_pill(app);
     app.emit("recording-cancelled", ())
         .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn cancel_recording(app: AppHandle) -> Result<(), String> {
+    cancel_active(&app)
 }
 
 #[cfg(test)]
@@ -428,39 +613,124 @@ mod tests {
             Err("未检测到有效音频".into())
         );
     }
+    #[test]
+    fn positions_pill_in_screen_coordinates_at_each_scale() {
+        assert_eq!(super::pill_position((0, 0), (1920, 1080), 1.0), (896, 792));
+        assert_eq!(
+            super::pill_position((0, 0), (2880, 1800), 2.0),
+            (1312, 1224)
+        );
+        assert_eq!(
+            super::pill_position((-1920, -100), (1920, 1080), 1.0),
+            (-1024, 692)
+        );
+    }
+
+    #[test]
+    fn cancelled_and_superseded_results_cannot_commit() {
+        use super::*;
+        let old = Arc::new(TranscriptionRun::new(1));
+        let fresh = Arc::new(TranscriptionRun::new(2));
+        let active = Mutex::new(Some(old.clone()));
+        old.cancel();
+        assert_eq!(
+            with_current_run(&active, &old, || panic!("cancelled result pasted")),
+            Err::<(), _>(CANCELLED.into())
+        );
+        *active.lock().unwrap() = Some(fresh.clone());
+        assert_eq!(
+            with_current_run(&active, &old, || panic!("old result pasted into new run")),
+            Err::<(), _>(CANCELLED.into())
+        );
+        assert_eq!(
+            with_current_run(&active, &fresh, || Ok("new result")),
+            Ok("new result")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_aborts_waiting_for_http_response() {
+        use super::*;
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/recognitions", listener.local_addr().unwrap());
+        let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut buffer = [0; 8192];
+            assert!(socket.read(&mut buffer).unwrap() > 0);
+            let _ = received_tx.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(3));
+        });
+        let path =
+            std::env::temp_dir().join(format!("pill-cancel-test-{}.wav", std::process::id()));
+        tokio::fs::write(&path, b"test audio").await.unwrap();
+        let run = Arc::new(TranscriptionRun::new(1));
+        let request_run = run.clone();
+        let request_path = path.clone();
+        let task = tokio::spawn(async move {
+            recognize_for_run(&request_run, url, request_path.to_str().unwrap()).await
+        });
+        tokio::time::timeout(Duration::from_secs(3), received_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        run.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.err(), Some(CANCELLED.into()));
+        let _ = release_tx.send(());
+        server.join().unwrap();
+        tokio::fs::remove_file(path).await.unwrap();
+    }
 }
 
 #[tauri::command]
-fn stop_recording(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
-    app.emit("recording-processing", ())
-        .map_err(|e| e.to_string())?;
-    Ok(stop_inner(&state)?.to_string_lossy().to_string())
-}
-fn stop_inner(state: &AppState) -> Result<PathBuf, String> {
-    let session = state
+async fn stop_recording(app: AppHandle) -> Result<RecordingFile, String> {
+    let session = app
+        .state::<AppState>()
         .recorder
         .lock()
         .map_err(|e| e.to_string())?
         .session
         .take()
         .ok_or("当前没有录音")?;
-    session.stop.send(()).map_err(|e| e.to_string())?;
-    session
-        .done
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|e| e.to_string())?
+    let run = session.run.clone();
+    run.check()?;
+    app.emit("recording-processing", ())
+        .map_err(|e| e.to_string())?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        session.stop.send(()).map_err(|e| e.to_string())?;
+        session
+            .done
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    match result {
+        Ok(path) if run.check().is_ok() => Ok(RecordingFile {
+            path: path.to_string_lossy().to_string(),
+            run_id: run.id,
+        }),
+        other => {
+            if let Ok(path) = &other {
+                let _ = std::fs::remove_file(path);
+            }
+            finish_run(&app, run.id).await;
+            Err(other.err().unwrap_or_else(|| CANCELLED.into()))
+        }
+    }
 }
 
-#[tauri::command]
-async fn transcribe_file(app: AppHandle, path: String) -> Result<String, String> {
-    let url = app
-        .state::<AppState>()
-        .server_url
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clone()
-        + "/v1/recognitions";
-    let data = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
+async fn recognize(url: String, path: &str) -> Result<Recognition, String> {
+    let data = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
     let part = reqwest::multipart::Part::bytes(data)
         .file_name("recording.wav")
         .mime_str("audio/wav")
@@ -468,7 +738,7 @@ async fn transcribe_file(app: AppHandle, path: String) -> Result<String, String>
     let form = reqwest::multipart::Form::new()
         .part("audio", part)
         .text("language", "auto");
-    let result: Recognition = reqwest::Client::new()
+    reqwest::Client::new()
         .post(url)
         .multipart(form)
         .send()
@@ -478,41 +748,91 @@ async fn transcribe_file(app: AppHandle, path: String) -> Result<String, String>
         .map_err(|e| e.to_string())?
         .json()
         .await
+        .map_err(|e| e.to_string())
+}
+
+async fn recognize_for_run(
+    run: &TranscriptionRun,
+    url: String,
+    path: &str,
+) -> Result<Recognition, String> {
+    run.check()?;
+    tokio::select! {
+        biased;
+        _ = run.cancellation() => Err(CANCELLED.into()),
+        result = recognize(url, path) => result,
+    }
+}
+
+#[tauri::command]
+async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<String, String> {
+    if PathBuf::from(&file.path) != recording_path(file.run_id) {
+        return Err("无效的录音文件".into());
+    }
+    let run = app
+        .state::<AppState>()
+        .active
+        .lock()
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .filter(|run| run.id == file.run_id)
+        .cloned()
+        .ok_or(CANCELLED)?;
+    let result = async {
+        run.check()?;
+        let url = app
+            .state::<AppState>()
+            .server_url
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone()
+            + "/v1/recognitions";
+        let result = recognize_for_run(&run, url, &file.path).await?;
+        run.check()?;
+        let text = result.raw_text.clone();
+        let paste_app = app.clone();
+        let paste_run = run.clone();
+        let (paste_tx, paste_rx) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let outcome = (|| -> Result<(), String> {
+                // Cancellation and the final paste are serialized with the active
+                // run, so a delayed reply can never paste into a newer session.
+                let state = paste_app.state::<AppState>();
+                with_current_run(&state.active, &paste_run, || {
+                    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+                    clipboard.set_text(text).map_err(|e| e.to_string())?;
+                    let mut enigo = enigo::Enigo::new(&enigo::Settings::default())
+                        .map_err(|e| e.to_string())?;
+                    use enigo::{Direction, Key, Keyboard};
+                    let modifier = if cfg!(target_os = "macos") {
+                        Key::Meta
+                    } else {
+                        Key::Control
+                    };
+                    enigo
+                        .key(modifier, Direction::Press)
+                        .map_err(|e| e.to_string())?;
+                    let pasted = enigo
+                        .key(Key::Unicode('v'), Direction::Click)
+                        .map_err(|e| e.to_string());
+                    let released = enigo
+                        .key(modifier, Direction::Release)
+                        .map_err(|e| e.to_string());
+                    pasted?;
+                    released?;
+                    Ok(())
+                })
+            })();
+            let _ = paste_tx.send(outcome);
+        })
         .map_err(|e| e.to_string())?;
-    let _ = tokio::fs::remove_file(&path).await;
-    let text = result.raw_text.clone();
-    let (paste_tx, paste_rx) = std::sync::mpsc::channel();
-    app.run_on_main_thread(move || {
-        let outcome = (|| -> Result<(), String> {
-            let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-            clipboard.set_text(text).map_err(|e| e.to_string())?;
-            let mut enigo =
-                enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| e.to_string())?;
-            use enigo::{Direction, Key, Keyboard};
-            let modifier = if cfg!(target_os = "macos") {
-                Key::Meta
-            } else {
-                Key::Control
-            };
-            enigo
-                .key(modifier, Direction::Press)
-                .map_err(|e| e.to_string())?;
-            enigo
-                .key(Key::Unicode('v'), Direction::Click)
-                .map_err(|e| e.to_string())?;
-            enigo
-                .key(modifier, Direction::Release)
-                .map_err(|e| e.to_string())?;
-            Ok(())
-        })();
-        let _ = paste_tx.send(outcome);
-    })
-    .map_err(|e| e.to_string())?;
-    paste_rx
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|e| e.to_string())??;
-    hide_pill(&app);
-    Ok(result.raw_text)
+        paste_rx.await.map_err(|e| e.to_string())??;
+        Ok(result.raw_text)
+    }
+    .await;
+    let _ = tokio::fs::remove_file(&file.path).await;
+    finish_run(&app, run.id).await;
+    result
 }
 
 #[tauri::command]
@@ -540,6 +860,9 @@ fn set_shortcut(
         return Err("快捷键不能为空".into());
     }
     let new_shortcut = parse_shortcut(&shortcut)?;
+    if new_shortcut == parse_shortcut("Escape")? {
+        return Err("Esc 用于取消语音输入，请设置其他快捷键".into());
+    }
     let mut current = state.shortcut.lock().map_err(|e| e.to_string())?;
     if *current == shortcut {
         return Ok(());

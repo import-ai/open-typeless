@@ -22,6 +22,8 @@
       },
       {
         "label": "pill",
+        "acceptFirstMouse": true,
+        "focusable": false,
         "title": "OpenTypeless microphone",
         "width": 128,
         "height": 32,

@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default permissions","local":true,"windows":["main","pill","pill-debug"],"permissions":["core:default","global-shortcut:default"]}}
+{"default":{"identifier":"default","description":"Default permissions","local":true,"windows":["main","pill","pill-debug"],"permissions":["core:default","global-shortcut:default"]},"pill-drag":{"identifier":"pill-drag","description":"Drag the microphone overlay by its waveform and spinner","local":true,"windows":["pill"],"permissions":["core:window:allow-start-dragging"]}}

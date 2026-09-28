@@ -40,3 +40,6 @@ html[data-window="pill"] body, html[data-window="pill-debug"] body {
 .recording-pill[data-state="unready"] .pill-waveform { color: #999; }
 .pill-debug-gallery { display: flex; flex-direction: column; gap: 16px; padding: 16px 24px; }
 .pill-debug-label { display: table; margin: 0 0 6px; padding: 2px 7px; border-radius: 6px; background: #000b; color: white; font-size: 11px; line-height: 16px; }
+
+.pill-draggable { cursor: grab; user-select: none; }
+.pill-draggable:active { cursor: grabbing; }

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useTauriEvent } from '@/hooks/use-tauri-event'
 import { commands, desktop, type PillState } from '@/lib/desktop'
 
 type PreviewState = PillState | 'hidden'
@@ -14,6 +15,8 @@ export function DeveloperOptions({ disabled }: { disabled: boolean }) {
   const [state, setState] = useState<PreviewState>('hidden')
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('不录音、不调用 ASR，直接预览桌面 pill。')
+
+  useTauriEvent('pill-hidden', () => { setState('hidden'); setStatus('Pill 已隐藏') })
 
   async function preview(mode: PreviewState) {
     setBusy(true)
