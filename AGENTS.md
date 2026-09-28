@@ -102,6 +102,13 @@ npm run tauri build     # 桌面打包，自动执行前端构建
 - 根目录 Dockerfile 只打包 Go Business Server，不包含 ASR。容器的 `INFERENCE_URL` 必须可从容器内访问。
 - 修改启动方式、配置或用户行为时同步相关文档。保留任务开始前的未提交修改，避免无关重构和格式化。
 
+## Branch names
+
+Use `<type>/<short-description>` for branch names. Follow Conventional Commits
+types such as `feat/`, `fix/`, `docs/`, `refactor/`, `test/`, and `chore/`, choosing
+the type that matches the work. Keep the description lowercase and hyphen-separated,
+for example `feat/personal-dictionary`. Do not use the `codex/` prefix.
+
 ## Commit messages
 
 Use the Conventional Commits format:
