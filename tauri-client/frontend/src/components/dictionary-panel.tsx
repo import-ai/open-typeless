@@ -97,7 +97,7 @@ export function DictionaryPanel({ onInputActiveChange }: { onInputActiveChange: 
       <p className="mt-2 text-sm leading-relaxed text-muted-foreground">添加常用词，提高专有名词的识别准确度。</p>
     </div>
     <div className="relative">
-      <Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" />
+      <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
       <Input aria-label="搜索词汇" placeholder="搜索词汇…" className="pl-9" value={query} disabled={!loaded}
         readOnly={searchFocused && !guard.ready}
         onFocus={() => setSearchFocused(true)} onBlur={() => setSearchFocused(false)}
