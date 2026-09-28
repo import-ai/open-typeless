@@ -1,4 +1,5 @@
-mod right_command;
+mod modifier_shortcut;
+mod settings_file;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ struct AppState {
     server_url: Mutex<String>,
     shortcut: Mutex<String>,
     shortcut_capturing: Mutex<bool>,
+    settings_warning: Mutex<Option<String>>,
 }
 const CANCELLED: &str = "已取消本次识别";
 
@@ -83,6 +85,8 @@ struct Settings {
     shortcut: String,
     server_url: String,
     shortcut_warning: Option<String>,
+    developer_options: bool,
+    settings_warning: Option<String>,
 }
 
 /// Remove the leading capture delay while retaining a short amount of context
@@ -145,27 +149,26 @@ fn main() {
             recorder: Mutex::new(Recorder { session: None }),
             active: Mutex::new(None),
             next_run: AtomicU64::new(1),
-            server_url: Mutex::new("http://127.0.0.1:8080".into()),
+            server_url: Mutex::new(String::new()),
             shortcut: Mutex::new(default_shortcut_name().into()),
             shortcut_capturing: Mutex::new(false),
+            settings_warning: Mutex::new(None),
         })
         .setup(|app| {
-            #[cfg(target_os = "macos")]
-            if let Err(error) = right_command::install(app.handle()) {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            if let Err(error) = modifier_shortcut::install(app.handle()) {
                 eprintln!("{error}");
             }
-            bind_named_shortcut(app.handle(), default_shortcut_name())?;
+            restore_settings(app.handle())?;
             position_pill(app.handle())?;
-            if std::env::var_os("OPEN_TYPELESS_PILL_DEBUG").is_some() {
-                if let Some(window) = app.get_webview_window("pill-debug") {
-                    let _ = window.show();
-                }
-            }
             Ok(())
         })
         .on_window_event(|window, event| {
             if window.label() == "main"
-                && matches!(event, tauri::WindowEvent::Focused(false) | tauri::WindowEvent::Destroyed)
+                && matches!(
+                    event,
+                    tauri::WindowEvent::Focused(false) | tauri::WindowEvent::Destroyed
+                )
             {
                 let app = window.app_handle();
                 if let Err(error) = set_shortcut_capture(app.clone(), app.state(), false) {
@@ -181,6 +184,7 @@ fn main() {
             debug_pill_preview,
             transcribe_file,
             set_server_url,
+            check_server_connection,
             get_settings,
             set_shortcut,
             set_shortcut_capture
@@ -192,32 +196,78 @@ fn main() {
 fn default_shortcut_name() -> &'static str {
     if cfg!(target_os = "macos") {
         "RCommand"
+    } else if cfg!(target_os = "windows") {
+        "RControl"
     } else {
         "Control+Shift+Space"
     }
 }
 
-fn is_right_command(name: &str) -> bool {
-    cfg!(target_os = "macos")
-        && matches!(
-            name.trim().to_ascii_uppercase().as_str(),
-            "RCOMMAND" | "RIGHTCOMMAND"
-        )
+fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join("settings.json"))
+        .map_err(|e| e.to_string())
+}
+
+fn restore_settings(app: &AppHandle) -> Result<(), String> {
+    let mut warnings = Vec::new();
+    let mut saved = match settings_path(app).and_then(|path| settings_file::load(&path)) {
+        Ok(saved) => saved,
+        Err(error) => {
+            warnings.push(error);
+            settings_file::SavedSettings::default()
+        }
+    };
+    saved.server_url = match normalize_server_url(&saved.server_url) {
+        Ok(url) => url,
+        Err(error) => {
+            warnings.push(format!("保存的后端地址无效: {error}"));
+            String::new()
+        }
+    };
+    saved.shortcut = saved.shortcut.trim().to_owned();
+    if let Err(error) = bind_named_shortcut(app, &saved.shortcut) {
+        warnings.push(format!(
+            "无法恢复快捷键 {}: {error}，已改用默认快捷键",
+            saved.shortcut
+        ));
+        saved.shortcut = default_shortcut_name().into();
+        bind_named_shortcut(app, &saved.shortcut)?;
+    }
+    let state = app.state::<AppState>();
+    *state.shortcut.lock().map_err(|e| e.to_string())? = saved.shortcut;
+    *state.server_url.lock().map_err(|e| e.to_string())? = saved.server_url;
+    *state.settings_warning.lock().map_err(|e| e.to_string())? =
+        (!warnings.is_empty()).then(|| warnings.join("；"));
+    Ok(())
+}
+
+fn persist_settings(app: &AppHandle, shortcut: &str, server_url: &str) -> Result<(), String> {
+    settings_file::save(
+        &settings_path(app)?,
+        &settings_file::SavedSettings {
+            shortcut: shortcut.into(),
+            server_url: server_url.into(),
+        },
+    )
+}
+
+fn is_modifier(name: &str) -> bool {
+    modifier_shortcut::is_modifier(name)
 }
 
 fn bind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
-    if is_right_command(name) {
-        right_command::enable(true);
-        Ok(())
+    if is_modifier(name) {
+        modifier_shortcut::configure(Some(name))
     } else {
         bind_shortcut(app, parse_shortcut(name)?)
     }
 }
 
 fn unbind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
-    if is_right_command(name) {
-        right_command::enable(false);
-        Ok(())
+    if is_modifier(name) {
+        modifier_shortcut::configure(None)
     } else {
         app.global_shortcut()
             .unregister(parse_shortcut(name)?)
@@ -238,6 +288,16 @@ fn bind_shortcut(app: &AppHandle, shortcut: Shortcut) -> Result<(), String> {
     app.global_shortcut()
         .on_shortcut(shortcut, move |_app, _shortcut, event| {
             if event.state == ShortcutState::Pressed {
+                // Esc remains cancellation while the pill is visible, even when
+                // the user chose it as the idle activation shortcut.
+                if shortcut == parse_shortcut("Escape").unwrap()
+                    && handle
+                        .get_webview_window("pill")
+                        .is_some_and(|w| w.is_visible().unwrap_or(false))
+                {
+                    let _ = cancel_active(&handle);
+                    return;
+                }
                 let _ = handle.emit_to("main", "toggle-requested", ());
             }
         })
@@ -281,6 +341,15 @@ async fn finish_run(app: &AppHandle, id: u64) {
 
 #[tauri::command]
 async fn start_recording(app: AppHandle) -> Result<(), String> {
+    if app
+        .state::<AppState>()
+        .server_url
+        .lock()
+        .map_err(|e| e.to_string())?
+        .is_empty()
+    {
+        return Err("后端地址未设置".into());
+    }
     let run = {
         let state = app.state::<AppState>();
         let mut active = state.active.lock().map_err(|e| e.to_string())?;
@@ -556,8 +625,16 @@ fn hide_pill(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("pill") {
         let _ = window.hide();
     }
-    if let Ok(escape) = parse_shortcut("Escape") {
-        let _ = app.global_shortcut().unregister(escape);
+    let shortcut_is_escape = app
+        .state::<AppState>()
+        .shortcut
+        .lock()
+        .map(|name| parse_shortcut(&name).ok() == parse_shortcut("Escape").ok())
+        .unwrap_or(false);
+    if !shortcut_is_escape {
+        if let Ok(escape) = parse_shortcut("Escape") {
+            let _ = app.global_shortcut().unregister(escape);
+        }
     }
     let _ = app.emit("mic-state", "disconnected");
     let _ = app.emit("pill-hidden", ());
@@ -569,8 +646,15 @@ fn dismiss_pill(app: AppHandle) {
 }
 
 // Exercise the real native window lifecycle without starting a microphone or ASR.
+fn developer_options_enabled() -> bool {
+    cfg!(debug_assertions) && std::env::var("OPEN_TYPELESS_DEBUG").as_deref() == Ok("1")
+}
+
 #[tauri::command]
 fn debug_pill_preview(app: AppHandle, mode: String) -> Result<String, String> {
+    if !developer_options_enabled() {
+        return Err("开发者选项仅在 tauri:debug 模式启用".into());
+    }
     if app
         .state::<AppState>()
         .active
@@ -701,7 +785,10 @@ mod tests {
         use super::*;
         use std::io::Read;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/v1/recognitions", listener.local_addr().unwrap());
+        let url = format!(
+            "http://{}/api/v1/recognitions",
+            listener.local_addr().unwrap()
+        );
         let (received_tx, received_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let server = std::thread::spawn(move || {
@@ -828,13 +915,13 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<String, 
         .ok_or(CANCELLED)?;
     let result = async {
         run.check()?;
-        let url = app
+        let base = app
             .state::<AppState>()
             .server_url
             .lock()
             .map_err(|e| e.to_string())?
-            .clone()
-            + "/v1/recognitions";
+            .clone();
+        let url = recognition_url(&base)?;
         let result = recognize_for_run(&run, url, &file.path).await?;
         run.check()?;
         let text = result.raw_text.clone();
@@ -883,23 +970,161 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<String, 
     result
 }
 
+fn normalize_server_url(url: &str) -> Result<String, String> {
+    let url = url.trim().trim_end_matches('/');
+    if url.is_empty() {
+        return Ok(String::new());
+    }
+    let parsed = reqwest::Url::parse(url).map_err(|_| "请输入有效的 HTTP 或 HTTPS 后端地址")?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err("请输入有效的 HTTP 或 HTTPS 后端地址".into());
+    }
+    Ok(url.into())
+}
+
+fn recognition_url(base: &str) -> Result<String, String> {
+    let base = normalize_server_url(base)?;
+    if base.is_empty() {
+        return Err("后端地址未设置".into());
+    }
+    // The configured base already includes the API prefix.
+    Ok(format!("{base}/recognitions"))
+}
+
+async fn check_backend(base: &str) -> Result<(), String> {
+    let base = normalize_server_url(base)?;
+    if base.is_empty() {
+        return Err("后端地址未设置".into());
+    }
+    let response = reqwest::Client::new()
+        .get(format!("{base}/health"))
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|_| "无法连接后端，请检查地址和服务状态")?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "后端连接失败（HTTP {}）",
+            response.status().as_u16()
+        ));
+    }
+    let body: serde_json::Value = response.json().await.map_err(|_| "后端健康检查响应无效")?;
+    if body.get("status").and_then(|status| status.as_str()) != Some("ok") {
+        return Err("后端健康检查未通过".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
-fn set_server_url(state: State<'_, AppState>, url: String) -> Result<(), String> {
-    *state.server_url.lock().map_err(|e| e.to_string())? = url.trim_end_matches('/').to_string();
+async fn check_server_connection(state: State<'_, AppState>) -> Result<(), String> {
+    let base = state.server_url.lock().map_err(|e| e.to_string())?.clone();
+    check_backend(&base).await
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+    #[tokio::test]
+    async fn readiness_requires_a_successful_health_response() {
+        use std::io::{Read, Write};
+        assert_eq!(check_backend("").await, Err("后端地址未设置".into()));
+        for (status, body, healthy) in [
+            ("200 OK", r#"{"status":"ok","version":"v0.1.0"}"#, true),
+            ("200 OK", r#"{"status":"error"}"#, false),
+            ("200 OK", "not-json", false),
+            ("503 Unavailable", r#"{"status":"ok"}"#, false),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}/api/v1/", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                assert!(request.starts_with(b"GET /api/v1/health HTTP/1.1\r\n"));
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            });
+            assert_eq!(check_backend(&base).await.is_ok(), healthy);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn validates_api_bases_and_preserves_proxy_paths() {
+        assert_eq!(normalize_server_url("  ").unwrap(), "");
+        assert!(recognition_url("").is_err());
+        assert_eq!(
+            recognition_url("http://localhost:8080/api/v1/").unwrap(),
+            "http://localhost:8080/api/v1/recognitions"
+        );
+        assert_eq!(
+            recognition_url("https://example.com/api/v1/").unwrap(),
+            "https://example.com/api/v1/recognitions"
+        );
+        assert_eq!(
+            recognition_url("https://example.com/proxy/asr/").unwrap(),
+            "https://example.com/proxy/asr/recognitions"
+        );
+        for invalid in [
+            "example.com",
+            "file:///tmp/audio",
+            "https://example.com/?token=x",
+            "https://user:password@example.com",
+        ] {
+            assert!(normalize_server_url(invalid).is_err());
+        }
+    }
+}
+
+#[tauri::command]
+fn set_server_url(app: AppHandle, state: State<'_, AppState>, url: String) -> Result<(), String> {
+    let url = normalize_server_url(&url)?;
+    // Both setters take these locks in this order so concurrent updates cannot
+    // replace the other setting with an older value in the persisted file.
+    let shortcut = state.shortcut.lock().map_err(|e| e.to_string())?;
+    let mut server_url = state.server_url.lock().map_err(|e| e.to_string())?;
+    persist_settings(&app, &shortcut, &url)?;
+    *server_url = url;
+    *state.settings_warning.lock().map_err(|e| e.to_string())? = None;
     Ok(())
 }
 
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     let shortcut = state.shortcut.lock().map_err(|e| e.to_string())?.clone();
+    let settings_warning = state
+        .settings_warning
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
     let shortcut_warning = None;
-    #[cfg(target_os = "macos")]
-    let shortcut_warning = if is_right_command(&shortcut) {
-        right_command::warning()
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let shortcut_warning = if is_modifier(&shortcut) {
+        modifier_shortcut::warning()
     } else {
         shortcut_warning
     };
     Ok(Settings {
+        settings_warning,
+        developer_options: developer_options_enabled(),
         shortcut_warning,
         shortcut,
         server_url: state.server_url.lock().map_err(|e| e.to_string())?.clone(),
@@ -938,14 +1163,17 @@ fn set_shortcut(
     if shortcut.is_empty() {
         return Err("快捷键不能为空".into());
     }
-    if !is_right_command(&shortcut) && parse_shortcut(&shortcut)? == parse_shortcut("Escape")? {
-        return Err("Esc 用于取消语音输入，请设置其他快捷键".into());
+    if !is_modifier(&shortcut) {
+        parse_shortcut(&shortcut)?;
     }
     let mut current = state.shortcut.lock().map_err(|e| e.to_string())?;
     if *state.shortcut_capturing.lock().map_err(|e| e.to_string())? {
         return Err("请先完成快捷键录入".into());
     }
+    let server_url = state.server_url.lock().map_err(|e| e.to_string())?;
     if *current == shortcut {
+        persist_settings(&app, &shortcut, &server_url)?;
+        *state.settings_warning.lock().map_err(|e| e.to_string())? = None;
         return Ok(());
     }
     unbind_named_shortcut(&app, &current)?;
@@ -953,6 +1181,14 @@ fn set_shortcut(
         let _ = bind_named_shortcut(&app, &current);
         return Err(error);
     }
+    if let Err(error) = persist_settings(&app, &shortcut, &server_url) {
+        let _ = unbind_named_shortcut(&app, &shortcut);
+        if let Err(restore_error) = bind_named_shortcut(&app, &current) {
+            return Err(format!("{error}；恢复原快捷键失败: {restore_error}"));
+        }
+        return Err(error);
+    }
     *current = shortcut;
+    *state.settings_warning.lock().map_err(|e| e.to_string())? = None;
     Ok(())
 }

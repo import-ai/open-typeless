@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/lucienshui/open-typeless/internal/buildinfo"
 )
 
 type server struct {
@@ -34,15 +36,15 @@ func main() {
 		maxBytes:     envInt64("MAX_AUDIO_BYTES", 12<<20),
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", s.health)
-	mux.HandleFunc("/v1/recognitions", s.recognize)
+	mux.HandleFunc("/api/v1/health", s.health)
+	mux.HandleFunc("/api/v1/recognitions", s.recognize)
 	addr := env("HTTP_ADDR", ":8080")
 	log.Printf("open-typeless business server listening on %s, inference=%s", addr, s.inferenceURL)
 	log.Fatal(http.ListenAndServe(addr, logging(cors(mux))))
 }
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": buildinfo.Version})
 }
 
 func (s *server) recognize(w http.ResponseWriter, r *http.Request) {

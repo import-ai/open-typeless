@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { ShortcutKeys } from '@/components/shortcut-keys'
 import { Button } from '@/components/ui/button'
-import { Kbd } from '@/components/ui/kbd'
 import { commands, desktop } from '@/lib/desktop'
 import { ShortcutCapture } from '@/lib/shortcut-capture'
 
 export function ShortcutRecorder({ value, disabled, onChange, onCapturingChange }: {
   value: string
   disabled: boolean
-  onChange: (value: string) => void
+  onChange: (value: string) => Promise<void>
   onCapturingChange: (value: boolean) => void
 }) {
   const [listening, setListening] = useState(false)
@@ -17,7 +16,7 @@ export function ShortcutRecorder({ value, disabled, onChange, onCapturingChange 
   const [error, setError] = useState('')
   const active = useRef(false)
   const button = useRef<HTMLButtonElement>(null)
-  const capture = useRef(new ShortcutCapture(navigator.userAgent.includes('Mac')))
+  const capture = useRef(new ShortcutCapture())
 
   async function finish(shortcut?: string) {
     if (!active.current) return
@@ -26,7 +25,7 @@ export function ShortcutRecorder({ value, disabled, onChange, onCapturingChange 
     setPending(true)
     try {
       if (desktop) await commands.captureShortcut(false)
-      if (shortcut) onChange(shortcut)
+      if (shortcut) await onChange(shortcut)
     } catch (error) { setError(String(error)) }
     finally { setPending(false); onCapturingChange(false) }
   }
@@ -38,7 +37,7 @@ export function ShortcutRecorder({ value, disabled, onChange, onCapturingChange 
     setPending(true)
     setError('')
     setPreview('')
-    capture.current = new ShortcutCapture(navigator.userAgent.includes('Mac'))
+    capture.current = new ShortcutCapture()
     try {
       if (desktop) await commands.captureShortcut(true)
       if (!active.current || document.activeElement !== button.current) {
@@ -80,6 +79,7 @@ export function ShortcutRecorder({ value, disabled, onChange, onCapturingChange 
       className={`h-auto min-h-8 w-full justify-start py-1.5 ${listening ? 'border-ring ring-2 ring-ring/30' : ''}`}
       disabled={disabled}
       aria-label={listening ? '请按下快捷键' : '录入语音输入快捷键'}
+      aria-labelledby={listening ? undefined : "shortcut-label"}
       aria-describedby="shortcut-help"
       aria-busy={pending}
       onClick={event => { event.currentTarget.focus(); void begin() }}
@@ -88,7 +88,6 @@ export function ShortcutRecorder({ value, disabled, onChange, onCapturingChange 
         if (!active.current) return
         event.preventDefault()
         event.stopPropagation()
-        if (event.key === 'Escape') { void finish(); return }
         if (!listening) return
         const result = capture.current.keyDown(event.nativeEvent)
         setPreview(result.preview)
@@ -105,14 +104,14 @@ export function ShortcutRecorder({ value, disabled, onChange, onCapturingChange 
         else {
           setError(result.error ?? '')
           setPreview('')
-          capture.current = new ShortcutCapture(navigator.userAgent.includes('Mac'))
+          capture.current = new ShortcutCapture()
         }
       }}
     >
       {listening ? (preview ? <ShortcutKeys shortcut={preview} /> : '请按下快捷键…') : <ShortcutKeys shortcut={value} />}
     </Button>
     <p id="shortcut-help" className="text-xs text-muted-foreground" aria-live="polite">
-      {error || (listening ? <>松开按键完成录入，<Kbd>Esc</Kbd> 取消。</> : '点击后直接按下快捷键，再点击保存。')}
+      {error || (listening ? '松开按键自动保存，点击其他位置取消。' : '点击后直接按下快捷键，松开即生效。')}
     </p>
   </div>
 }

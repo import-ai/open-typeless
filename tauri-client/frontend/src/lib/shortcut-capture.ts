@@ -1,7 +1,13 @@
 type KeyEvent = Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey' | 'repeat' | 'isComposing'>
 
-const modifier = /^(Control|Alt|Shift|Meta)(Left|Right)$/
-const supportedKey = /^(Key[A-Z]|Digit[0-9]|F([1-9]|1[0-9]|2[0-4])|Numpad([0-9]|Add|Decimal|Divide|Enter|Equal|Multiply|Subtract)|Backquote|Backslash|BracketLeft|BracketRight|Comma|Equal|Minus|Period|Quote|Semicolon|Slash|Backspace|CapsLock|Enter|Space|Tab|Delete|End|Home|Insert|PageDown|PageUp|PrintScreen|ScrollLock|Arrow(Down|Left|Right|Up)|NumLock|Pause)$/
+const modifier = /^(Control|Alt|Shift|Meta)(Left|Right)$|^Fn$/
+const modifierNames: Record<string, string> = {
+  MetaLeft: 'LCommand', MetaRight: 'RCommand',
+  ControlLeft: 'LControl', ControlRight: 'RControl',
+  ShiftLeft: 'LShift', ShiftRight: 'RShift',
+  AltLeft: 'LAlt', AltRight: 'RAlt', Fn: 'Fn',
+}
+const supportedKey = /^(Escape|Key[A-Z]|Digit[0-9]|F([1-9]|1[0-9]|2[0-4])|Numpad([0-9]|Add|Decimal|Divide|Enter|Equal|Multiply|Subtract)|Backquote|Backslash|BracketLeft|BracketRight|Comma|Equal|Minus|Period|Quote|Semicolon|Slash|Backspace|CapsLock|Enter|Space|Tab|Delete|End|Home|Insert|PageDown|PageUp|PrintScreen|ScrollLock|Arrow(Down|Left|Right|Up)|NumLock|Pause)$/
 
 export class ShortcutCapture {
   private held = new Set<string>()
@@ -9,8 +15,6 @@ export class ShortcutCapture {
   private modifiers = new Set<string>()
   private candidate = ''
   private invalid = false
-  private mac: boolean
-  constructor(mac: boolean) { this.mac = mac }
 
   keyDown(event: KeyEvent): { preview: string; error?: string } {
     if (event.repeat) return { preview: this.candidate }
@@ -19,8 +23,7 @@ export class ShortcutCapture {
     if (modifier.test(event.code)) {
       this.modifiers.add(event.code)
       if (!this.ordinary.size) {
-        this.candidate = this.mac && event.code === 'MetaRight' && modifiers.length === 1
-          ? 'RCommand' : modifiers.join('+')
+        this.candidate = this.modifiers.size === 1 ? modifierNames[event.code] : modifiers.join('+')
       }
     } else {
       this.ordinary.add(event.code)
@@ -42,8 +45,8 @@ export class ShortcutCapture {
       for (const key of this.held) if (!modifier.test(key)) this.held.delete(key)
     }
     if (this.held.size || event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) return { done: false }
-    if (this.invalid || (!this.ordinary.size && (this.candidate !== 'RCommand' || this.modifiers.size !== 1)) || !this.candidate) {
-      return { done: true, error: this.mac ? '单独的修饰键仅支持右 Command；请重新按下快捷键。' : '请按一个普通按键，可搭配 Ctrl、Alt、Shift。' }
+    if (this.invalid || (!this.ordinary.size && this.modifiers.size !== 1) || !this.candidate) {
+      return { done: true, error: '请按一个单键，或修饰键加一个普通按键。' }
     }
     return { done: true, shortcut: this.candidate }
   }

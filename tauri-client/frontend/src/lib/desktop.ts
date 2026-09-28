@@ -13,8 +13,15 @@ export const windowLabel = desktop
   : new URLSearchParams(location.search).get('view') ?? 'main'
 
 export interface RecordingFile { path: string; run_id: number }
-export interface Settings { shortcut: string; server_url: string; shortcut_warning: string | null }
+export interface Settings { shortcut: string; server_url: string; shortcut_warning: string | null; settings_warning: string | null; developer_options: boolean }
 export const commands = {
+  checkServer: async (base: string) => {
+    if (desktop) return invoke<void>('check_server_connection')
+    const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(3000) })
+      .catch(() => { throw new Error('无法连接后端，请检查地址和服务状态') })
+    if (!response.ok || (await response.json()).status !== 'ok') throw new Error('后端健康检查未通过')
+  },
+  serverUrl: (url: string) => invoke<void>('set_server_url', { url }),
   settings: () => invoke<Settings>('get_settings'),
   start: () => invoke<void>('start_recording'),
   stop: () => invoke<RecordingFile>('stop_recording'),

@@ -6,12 +6,12 @@ import { Kbd } from '@/components/ui/kbd'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ShortcutRecorder } from '@/components/shortcut-recorder'
-import { Label } from '@/components/ui/label'
+import { Input } from '@/components/ui/input'
 import { useTauriEvent } from '@/hooks/use-tauri-event'
 import { commands, desktop, micLabels, type MicState, type RecordingFile } from '@/lib/desktop'
 
 type Phase = 'idle' | 'starting' | 'recording' | 'processing'
-const previewShortcut = navigator.userAgent.includes('Mac') ? 'RCommand' : 'Control+Shift+Space'
+const previewShortcut = navigator.userAgent.includes('Mac') ? 'RCommand' : 'RControl'
 
 export function MainWindow() {
   const [phase, setPhase] = useState<Phase>('idle')
@@ -22,7 +22,15 @@ export function MainWindow() {
   const [mic, setMic] = useState<MicState>('disconnected')
   const [status, setStatus] = useState(desktop ? '就绪' : '界面预览 · 请在桌面应用中录音')
   const [shortcut, setShortcut] = useState(desktop ? '' : previewShortcut)
-  const [savedShortcut, setSavedShortcut] = useState(desktop ? '' : previewShortcut)
+  const [serverUrl, setServerUrl] = useState('')
+  const savedServerUrl = useRef('')
+  const [configuredServerUrl, setConfiguredServerUrl] = useState('')
+  const [connection, setConnection] = useState<'checking' | 'ready' | 'error'>('checking')
+  const [connectionError, setConnectionError] = useState('')
+  const [serverStatus, setServerStatus] = useState('')
+  const [settingsWarning, setSettingsWarning] = useState('')
+  const [savingServer, setSavingServer] = useState(false)
+  const [developerOptions, setDeveloperOptions] = useState(false)
   const [capturingShortcut, setCapturingShortcut] = useState(false)
   const capturingShortcutRef = useRef(false)
   const [saving, setSaving] = useState(false)
@@ -35,21 +43,49 @@ export function MainWindow() {
     void commands.settings().then(settings => {
       if (!active) return
       setShortcut(settings.shortcut)
-      setSavedShortcut(settings.shortcut)
+      setServerUrl(settings.server_url)
+      savedServerUrl.current = settings.server_url
+      setConfiguredServerUrl(settings.server_url)
+      setDeveloperOptions(settings.developer_options)
       setLoaded(true)
-      if (settings.shortcut_warning) setStatus(settings.shortcut_warning)
+      setSettingsWarning(settings.settings_warning ?? settings.shortcut_warning ?? '')
     }).catch(error => { if (active) setStatus(String(error)) })
     return () => { active = false }
   }, [])
 
+  useEffect(() => {
+    if (!configuredServerUrl || phase !== 'idle') return
+    let active = true
+    let timer: ReturnType<typeof setTimeout>
+    setConnection('checking')
+    const check = async () => {
+      try {
+        await commands.checkServer(configuredServerUrl)
+        if (active) setConnection('ready')
+      } catch (error) {
+        if (active) { setConnection('error'); setConnectionError(error instanceof Error ? error.message : String(error)) }
+      }
+      if (active) timer = setTimeout(() => { void check() }, 30_000)
+    }
+    void check()
+    return () => { active = false; clearTimeout(timer) }
+  }, [configuredServerUrl, phase])
+
+  const idleStatus = !configuredServerUrl ? '后端地址未设置'
+    : connection === 'checking' ? '正在检查后端连接…'
+    : connection === 'error' ? connectionError : status
+
   async function start() {
     if (busy.current || phaseRef.current !== 'idle') return
+    if (!savedServerUrl.current) { setStatus('后端地址未设置'); return }
     const current = ++epoch.current
     busy.current = true
     changePhase('starting')
     setMic('unready')
     setStatus('等待麦克风输出…')
     try {
+      await commands.checkServer(savedServerUrl.current)
+      if (epoch.current !== current) return
       await commands.start()
       if (epoch.current !== current) return
       changePhase('recording')
@@ -107,16 +143,36 @@ export function MainWindow() {
     epoch.current++; busy.current = false; reset(); setStatus('已取消本次识别')
   })
 
-  async function saveShortcut() {
+  async function saveShortcut(value: string) {
     setSaving(true)
     try {
-      const value = shortcut.trim()
       if (desktop) await commands.shortcut(value)
-      setSavedShortcut(value)
+      setShortcut(value)
       const settings = desktop ? await commands.settings() : null
-      setStatus(settings?.shortcut_warning ?? '快捷键已更新')
-    } catch (error) { setStatus(String(error)) }
+      setSettingsWarning(settings?.settings_warning ?? settings?.shortcut_warning ?? '')
+      setStatus('快捷键已更新')
+    } catch (error) { setStatus(String(error)); throw error }
     finally { setSaving(false) }
+  }
+
+  async function saveServerUrl() {
+    const value = serverUrl.trim().replace(/\/+$/, '')
+    if (value === savedServerUrl.current) return
+    setSavingServer(true)
+    try {
+      if (value) {
+        const parsed = new URL(value)
+        if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname || parsed.search || parsed.hash || parsed.username || parsed.password) throw new Error('请输入有效的 HTTP 或 HTTPS 后端地址')
+      }
+      if (desktop) await commands.serverUrl(value)
+      savedServerUrl.current = value
+      setConnection('checking')
+      setConfiguredServerUrl(value)
+      setStatus('就绪')
+      setServerUrl(value)
+      setServerStatus(value ? '后端地址已保存' : '后端地址未设置')
+    } catch (error) { setServerStatus(String(error)) }
+    finally { setSavingServer(false) }
   }
 
   return <main className="mx-auto flex max-w-xl flex-col gap-5 p-6">
@@ -128,13 +184,13 @@ export function MainWindow() {
       <CardHeader>
         <CardTitle className="text-sm">语音输入</CardTitle>
         <CardDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          {savedShortcut ? <><ShortcutKeys shortcut={savedShortcut} /><span>开始 / 完成</span></> : '快捷键加载后显示'}
+          {shortcut ? <><ShortcutKeys shortcut={shortcut} /><span>开始 / 完成</span></> : '快捷键加载后显示'}
           <span className="inline-flex items-center gap-1"><Kbd>Esc</Kbd>取消</span>
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex items-center justify-between gap-3">
-          <Button disabled={!loaded || capturingShortcut || phase === 'starting' || phase === 'processing'} onClick={() => { void (phase === 'recording' ? stop() : start()) }}>
+          <Button disabled={!loaded || savingServer || capturingShortcut || phase === 'starting' || phase === 'processing'} onClick={() => { void (phase === 'recording' ? stop() : start()) }}>
             {phase === 'recording' ? <Square /> : <Mic />}
             {phase === 'recording' ? '停止录音' : phase === 'starting' ? '连接中…' : phase === 'processing' ? '识别中…' : '开始录音'}
           </Button>
@@ -143,21 +199,39 @@ export function MainWindow() {
             麦克风{micLabels[mic]}
           </span>
         </div>
-        <p role="status" className="min-h-5 break-words text-sm text-muted-foreground">{status}</p>
+        <p role="status" className="min-h-5 break-words text-sm text-muted-foreground">{phase === 'idle' ? idleStatus : status}</p>
       </CardContent>
     </Card>
-    <section className="space-y-3" aria-label="设置">
-      <Label htmlFor="shortcut">语音输入快捷键</Label>
-      <div className="flex gap-2">
-        <ShortcutRecorder
-          value={shortcut}
-          disabled={(desktop && !loaded) || saving || phase !== 'idle'}
-          onChange={setShortcut}
-          onCapturingChange={value => { capturingShortcutRef.current = value; setCapturingShortcut(value) }}
+    <details className="rounded-lg border p-3">
+      <summary className="cursor-pointer text-sm font-medium">设置</summary>
+      <section className="mt-4 space-y-3" aria-labelledby="shortcut-label">
+        <h2 id="shortcut-label" className="text-sm font-medium">语音输入快捷键</h2>
+        <div className="flex gap-2">
+          <ShortcutRecorder
+            value={shortcut}
+            disabled={(desktop && !loaded) || saving || phase !== 'idle'}
+            onChange={saveShortcut}
+            onCapturingChange={value => { capturingShortcutRef.current = value; setCapturingShortcut(value) }}
+          />
+        </div>
+      </section>
+      <div className="mt-4 space-y-2">
+        <h2 id="server-url-label" className="text-sm font-medium">后端地址</h2>
+        <Input
+          aria-labelledby="server-url-label"
+          aria-describedby="server-url-help"
+          type="url"
+          value={serverUrl}
+          placeholder="https://example.com/api/v1"
+          disabled={(desktop && !loaded) || savingServer || phase !== 'idle'}
+          onChange={event => { setServerUrl(event.target.value); setServerStatus('') }}
+          onBlur={() => { void saveServerUrl() }}
+          onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
         />
-        <Button variant="outline" disabled={(desktop && !loaded) || capturingShortcut || saving || !shortcut.trim() || shortcut === savedShortcut} onClick={() => { void saveShortcut() }}>{saving ? '保存中…' : '保存'}</Button>
+        <p id="server-url-help" role="status" className="text-xs text-muted-foreground">{serverStatus || '按回车或移开焦点自动保存。'}</p>
       </div>
-    </section>
-    <DeveloperOptions disabled={phase !== 'idle'} />
+      {settingsWarning && <p role="status" className="mt-3 text-xs text-destructive">{settingsWarning}</p>}
+    </details>
+    {developerOptions && <DeveloperOptions disabled={phase !== 'idle' || capturingShortcut} />}
   </main>
 }

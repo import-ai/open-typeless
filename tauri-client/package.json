@@ -7,7 +7,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "tauri:debug": "cross-env OPEN_TYPELESS_PILL_DEBUG=1 tauri dev"
+    "tauri:debug": "cross-env OPEN_TYPELESS_DEBUG=1 tauri dev"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",

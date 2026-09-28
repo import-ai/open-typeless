@@ -10,10 +10,10 @@ Qwen3-ASR HTTP 接口调用。启动：
 INFERENCE_URL=http://localhost:18080 go run ./cmd/server
 ```
 
-接口为 `POST /v1/recognitions`，字段 `audio`（WAV/MP3/M4A/WebM）、可选
+接口为 `POST /api/v1/recognitions`，字段 `audio`（WAV/MP3/M4A/WebM）、可选
 `language` 和 `hotwords`。响应包含 PRD 约定的 `raw_text`、`polished_text`、
 `language` 和 `duration_ms`。当前没有接入润色模型，因此 `polished_text` 与
-`raw_text` 相同。
+`raw_text` 相同。健康检查为 `GET /api/v1/health`，返回 `{"status":"ok","version":"v0.1.0"}`。调试服务使用相同路由，额外返回 `audio_dir`。
 
 调试客户端录音时可以临时启动 `cmd/debug-server` 接管 8080。它不会调用 ASR，
 会把收到的音频保存到 `/tmp/open-typeless-debug`，并始终返回 `raw_text: "foo"`：
@@ -45,7 +45,7 @@ npm run tauri build  # 构建桌面程序（自动运行前端构建）
 
 浏览器访问 `http://localhost:5173/?view=pill-debug` 可单独调整 pill。
 
-主窗口的“开发者选项”可显示、隐藏原生 pill，并切换未连接、未就绪、已就绪、识别中四态。
+通过 `npm run tauri:debug` 启动时，主窗口的“开发者选项”可显示、隐藏原生 pill，并切换未连接、未就绪、已就绪、识别中四态。
 点击状态会直接显示对应外观；该预览不启用麦克风、不调用 ASR，录音和识别期间不可用。
 原生外观回归：检查“识别中 → 未连接”和“识别中 → 已就绪 → 未连接”，胶囊左右圆角及底边应完整。
 胶囊和识别圆形保留各自固定尺寸的元素，通过透明度切换；避免复用同一个元素改变尺寸造成 macOS 裁切残留。
@@ -60,11 +60,21 @@ macOS 上 pill 接受首次鼠标点击且不接管键盘焦点。Pill 显示期
 macOS 默认使用 `RCommand`：单独按下并松开右 Command 开始录音，再次单独松开停止并识别。
 按住期间使用其他按键、修饰键或点击鼠标会取消本次快捷键触发，因此右 Command+C 等组合不触发录音。
 通过原生 AppKit 本地及全局事件监听实现，需辅助功能权限；未授权时界面显示提示，授权后重启应用。
-Windows 默认仍为 `Control+Shift+Space`，暂不支持单独右 Control。
-设置界面可输入 `RCommand` 或常规组合键，保存后立即生效（设置暂不跨重启保存）。
+Windows 默认使用单独右 Control（`RControl`），通过原生键盘监听识别独立按下。
+设置界面直接录入单键或常规组合键，松开后立即生效（快捷键和后端地址自动保存，下次启动恢复）。
 停止录音后生成临时 WAV，上传到 Business Server，收到 `raw_text` 后写入
 剪贴板并模拟 `Ctrl/Command+V` 粘贴到当前窗口。服务端地址默认是
-`http://127.0.0.1:8080`，可在 Rust 状态中通过 `set_server_url` 调整。
+空，在主窗口展开“设置”后填写后端地址，回车或移开焦点自动生效。本地服务可填写 `http://127.0.0.1:8080/api/v1`，反向代理可填写 `https://example.com/api/v1`。客户端将该地址作为完整 API base URL，仅追加 `/recognitions`。
 
 macOS 首次运行需要在“隐私与安全性”中允许麦克风，并给应用辅助功能权限，
 这样系统才允许全局热键和向当前窗口发送粘贴按键。
+
+快捷键设置只响应输入框内的点击。点击后直接按键，松开后自动生效，无需保存按钮。
+支持普通单键，以及左右 Command、Ctrl、Shift、Alt 的单独按下；修饰键与普通键组合继续可用。
+录入时点击其他位置取消。Esc 也可作为激活键；Pill 显示期间 Esc 仍用于取消本次识别。
+后端地址默认为空，未配置时不会启动录音。普通 `tauri dev` 不显示开发者选项。
+
+客户端设置保存在系统应用配置目录中的 `com.opentypeless.client/settings.json`。
+macOS 路径为 `~/Library/Application Support/com.opentypeless.client/settings.json`，Windows 为 `%APPDATA%\com.opentypeless.client\settings.json`。
+保存使用临时文件并原子替换，写入失败会显示错误并保留原设置。
+启动时恢复设置；后端地址为空显示“后端地址未设置”，非空时请求 `<base_url>/health`，检查成功后才显示“就绪”。空闲时每 30 秒复查，开始录音前也会检查。

@@ -16,6 +16,9 @@
       {
         "label": "main",
         "title": "Open Typeless",
+        "titleBarStyle": "Transparent",
+        "backgroundColor": "#ffffff",
+        "theme": "Light",
         "width": 420,
         "height": 680,
         "resizable": false
