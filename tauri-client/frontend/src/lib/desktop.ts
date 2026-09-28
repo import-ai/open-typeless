@@ -1,5 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { loadPreviewDictionary, savePreviewWord, deletePreviewWords, type DictionaryEntry } from './dictionary'
 
 export type MicState = 'disconnected' | 'unready' | 'ready'
 export type PillState = MicState | 'processing'
@@ -15,6 +16,9 @@ export const windowLabel = desktop
 export interface RecordingFile { path: string; run_id: number }
 export interface Settings { shortcut: string; server_url: string; shortcut_warning: string | null; settings_warning: string | null; developer_options: boolean }
 export const commands = {
+  dictionary: async () => desktop ? invoke<DictionaryEntry[]>('get_dictionary') : loadPreviewDictionary(),
+  saveWord: async (text: string, id?: string) => desktop ? invoke<DictionaryEntry[]>('save_dictionary_entry', { text, id: id ?? null }) : savePreviewWord(id, text),
+  deleteWords: async (ids: string[]) => desktop ? invoke<DictionaryEntry[]>('delete_dictionary_entries', { ids }) : deletePreviewWords(ids),
   checkServer: async (base: string) => {
     if (desktop) return invoke<void>('check_server_connection')
     const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(3000) })

@@ -55,6 +55,7 @@ export function ShortcutRecorder({ value, disabled, onChange, onCapturingChange 
   useEffect(() => () => {
     if (active.current && desktop) void commands.captureShortcut(false).catch(console.error)
     active.current = false
+    onCapturingChange(false)
   }, [])
 
   useEffect(() => {

@@ -1,3 +1,4 @@
+mod dictionary;
 mod modifier_shortcut;
 mod settings_file;
 
@@ -30,11 +31,13 @@ struct AppState {
     shortcut: Mutex<String>,
     shortcut_capturing: Mutex<bool>,
     settings_warning: Mutex<Option<String>>,
+    dictionary_lock: Mutex<()>,
 }
 const CANCELLED: &str = "已取消本次识别";
 
 struct TranscriptionRun {
     id: u64,
+    hotwords: String,
     cancelled: AtomicBool,
     notification: tokio::sync::Notify,
     capture_stop: Mutex<Option<mpsc::Sender<()>>>,
@@ -43,6 +46,7 @@ impl TranscriptionRun {
     fn new(id: u64) -> Self {
         Self {
             id,
+            hotwords: String::new(),
             cancelled: AtomicBool::new(false),
             notification: tokio::sync::Notify::new(),
             capture_stop: Mutex::new(None),
@@ -153,6 +157,7 @@ fn main() {
             shortcut: Mutex::new(default_shortcut_name().into()),
             shortcut_capturing: Mutex::new(false),
             settings_warning: Mutex::new(None),
+            dictionary_lock: Mutex::new(()),
         })
         .setup(|app| {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -186,6 +191,9 @@ fn main() {
             set_server_url,
             check_server_connection,
             get_settings,
+            get_dictionary,
+            save_dictionary_entry,
+            delete_dictionary_entries,
             set_shortcut,
             set_shortcut_capture
         ])
@@ -208,6 +216,43 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
         .app_config_dir()
         .map(|directory| directory.join("settings.json"))
         .map_err(|e| e.to_string())
+}
+
+fn dictionary_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join("dictionary.json"))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_dictionary(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<dictionary::Entry>, String> {
+    let _guard = state.dictionary_lock.lock().map_err(|e| e.to_string())?;
+    dictionary::load(&dictionary_path(&app)?)
+}
+
+#[tauri::command]
+fn save_dictionary_entry(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: Option<String>,
+    text: String,
+) -> Result<Vec<dictionary::Entry>, String> {
+    let _guard = state.dictionary_lock.lock().map_err(|e| e.to_string())?;
+    dictionary::upsert(&dictionary_path(&app)?, id.as_deref(), &text)
+}
+
+#[tauri::command]
+fn delete_dictionary_entries(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<Vec<dictionary::Entry>, String> {
+    let _guard = state.dictionary_lock.lock().map_err(|e| e.to_string())?;
+    dictionary::delete(&dictionary_path(&app)?, &ids)
 }
 
 fn restore_settings(app: &AppHandle) -> Result<(), String> {
@@ -356,9 +401,12 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
         if active.is_some() {
             return Err("已有录音或识别进行中".into());
         }
-        let run = Arc::new(TranscriptionRun::new(
-            state.next_run.fetch_add(1, Ordering::SeqCst),
-        ));
+        let mut run = TranscriptionRun::new(state.next_run.fetch_add(1, Ordering::SeqCst));
+        {
+            let _guard = state.dictionary_lock.lock().map_err(|e| e.to_string())?;
+            run.hotwords = dictionary::hotwords(&dictionary::load(&dictionary_path(&app)?)?);
+        }
+        let run = Arc::new(run);
         *active = Some(run.clone());
         run
     };
@@ -631,7 +679,12 @@ fn hide_pill(app: &AppHandle) {
         .lock()
         .map(|name| parse_shortcut(&name).ok() == parse_shortcut("Escape").ok())
         .unwrap_or(false);
-    if !shortcut_is_escape {
+    let shortcut_suspended = *app
+        .state::<AppState>()
+        .shortcut_capturing
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if !shortcut_is_escape || shortcut_suspended {
         if let Ok(escape) = parse_shortcut("Escape") {
             let _ = app.global_shortcut().unregister(escape);
         }
@@ -824,6 +877,63 @@ mod tests {
         server.join().unwrap();
         tokio::fs::remove_file(path).await.unwrap();
     }
+
+    #[tokio::test]
+    async fn upload_uses_dictionary_snapshot_even_after_disk_changes() {
+        use super::*;
+        use std::io::{Read, Write};
+        let directory = tempfile::tempdir().unwrap();
+        let dictionary_path = directory.path().join("dictionary.json");
+        dictionary::upsert(&dictionary_path, None, "OAuth").unwrap();
+        let entries = dictionary::upsert(&dictionary_path, None, "赵阳").unwrap();
+        let mut run = TranscriptionRun::new(1);
+        run.hotwords = dictionary::hotwords(&entries);
+        dictionary::upsert(&dictionary_path, Some(&entries[1].id), "changed").unwrap();
+        let audio_path = directory.path().join("recording.wav");
+        std::fs::write(&audio_path, b"test audio").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/api/v1/recognitions",
+            listener.local_addr().unwrap()
+        );
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let count = socket.read(&mut buffer).unwrap();
+                assert!(count > 0, "incomplete request");
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("POST /api/v1/recognitions "));
+            assert!(request.contains("name=\"hotwords\"\r\n\r\n赵阳\nOAuth\r\n"));
+            assert!(!request.contains("changed"));
+            assert!(request.contains("test audio"));
+            let body = r#"{"raw_text":"OAuth"}"#;
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let result = recognize_for_run(&run, url, audio_path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(result.raw_text, "OAuth");
+        server.join().unwrap();
+    }
 }
 
 #[tauri::command]
@@ -864,7 +974,7 @@ async fn stop_recording(app: AppHandle) -> Result<RecordingFile, String> {
     }
 }
 
-async fn recognize(url: String, path: &str) -> Result<Recognition, String> {
+async fn recognize(url: String, path: &str, hotwords: &str) -> Result<Recognition, String> {
     let data = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
     let part = reqwest::multipart::Part::bytes(data)
         .file_name("recording.wav")
@@ -872,7 +982,8 @@ async fn recognize(url: String, path: &str) -> Result<Recognition, String> {
         .map_err(|e| e.to_string())?;
     let form = reqwest::multipart::Form::new()
         .part("audio", part)
-        .text("language", "auto");
+        .text("language", "auto")
+        .text("hotwords", hotwords.to_owned());
     reqwest::Client::new()
         .post(url)
         .multipart(form)
@@ -895,7 +1006,7 @@ async fn recognize_for_run(
     tokio::select! {
         biased;
         _ = run.cancellation() => Err(CANCELLED.into()),
-        result = recognize(url, path) => result,
+        result = recognize(url, path, &run.hotwords) => result,
     }
 }
 
@@ -1144,7 +1255,13 @@ fn set_shortcut_capture(
     if *active == capturing {
         return Ok(());
     }
-    if capturing {
+    let escape_cancels_recording = parse_shortcut(&current).ok() == parse_shortcut("Escape").ok()
+        && app
+            .get_webview_window("pill")
+            .is_some_and(|window| window.is_visible().unwrap_or(false));
+    if escape_cancels_recording {
+        // Keep cancellation available while editing words during a recording.
+    } else if capturing {
         unbind_named_shortcut(&app, &current)?;
     } else {
         bind_named_shortcut(&app, &current)?;
