@@ -29,6 +29,7 @@ coverage.html
 # Rust / Tauri
 target/
 **/target/
+tauri-client/icons/generated/
 
 # Node.js / frontend
 node_modules/
@@ -60,6 +61,11 @@ ENV/
 tmp/
 temp/
 
+# Local documentation assets and archives
+/docs/assets/
+/docs/archive/
+
 # Local ASR deployment assets (downloaded models and source)
-deploy/asr/models/
-deploy/asr/r2t2-src/
+/deploy
+/prd.md
+/cmd/debug-server/

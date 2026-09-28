@@ -1,6 +1,35 @@
 # Open Typeless
 Open Typeless, deploy once, using everywhere.
 
+## 自动构建
+
+GitHub Actions 在 PR、`main` 推送、`v*` 标签推送和手动触发时运行：
+
+- **Desktop build**：使用 GitHub 托管 runner，构建 macOS Apple Silicon / Intel 的
+  DMG，以及 Windows x64 的 NSIS EXE / MSI。在对应运行的 **Artifacts** 中下载
+  `open-typeless-macos-arm64`、`open-typeless-macos-x64` 或 `open-typeless-windows-x64`。
+  当前未配置 Developer ID 签名、公证或 Windows 代码签名。
+- **Server build**：先运行 Go 测试和 vet，再构建 `linux/amd64`、`linux/arm64`
+  镜像。PR 只构建，其他触发使用 `GITHUB_TOKEN` 推送到
+  `ghcr.io/lucienshui/open-typeless`，不需要 Docker Hub 凭据。
+  `main` 分支对应 `:main`；例如 `v0.1.0` 标签生成 `:0.1.0`、`:0.1` 和 `:latest`
+  （预发布版本不更新 `latest`）。手动运行使用所选分支或版本标签。
+
+发布客户端前同步更新 `tauri-client/tauri.conf.json`、`tauri-client/Cargo.toml`
+和 `tauri-client/Cargo.lock` 中的应用版本；服务端健康检查版本在
+`internal/buildinfo/version.go` 中维护。
+
+服务端容器只包含 Business Server，ASR 服务需单独部署，例如：
+
+```sh
+docker run --rm -p 8080:8080 \
+  -e INFERENCE_URL=http://your-asr-host:18080 \
+  ghcr.io/lucienshui/open-typeless:main
+```
+
+`INFERENCE_URL` 必须是容器内可访问的 ASR 地址，不能用 `localhost` 指代宿主机。
+本地镜像可通过 `docker build -t open-typeless .` 构建。
+
 ## 本地第一阶段
 
 Business Server 是 `cmd/server`，把客户端的 multipart 上传转换为当前已验证的
@@ -43,6 +72,12 @@ npm run build        # 检查类型并生成 dist/
 npm run tauri build  # 构建桌面程序（自动运行前端构建）
 ```
 
+应用图标的唯一源文件是 `tauri-client/icons/icon.svg`，底图、声波和猫头为三个独立分组。
+`tauri dev`、`tauri build` 和 GitHub 桌面构建会从该 SVG 生成 PNG、macOS ICNS 和 Windows ICO，
+输出到已忽略的 `tauri-client/icons/generated/`，打包配置统一使用这些生成文件。
+在 `tauri-client/` 中运行 `npm run generate:icons` 可单独生成；直接运行 Cargo 构建或测试前也需先生成图标。
+旧 PNG、设计方案和历史导出文件保存在 [图标归档](docs/archive/icons/2026-09-29/README.md)，不参与构建。
+
 浏览器访问 `http://localhost:5173/?view=pill-debug` 可单独调整 pill。
 
 通过 `npm run tauri:debug` 启动时，主窗口的“开发者选项”可显示、隐藏原生 pill，并切换未连接、未就绪、已就绪、识别中四态。
@@ -74,8 +109,13 @@ macOS 首次运行需要在“隐私与安全性”中允许麦克风，并给�
 录入时点击其他位置取消。Esc 也可作为激活键；Pill 显示期间 Esc 仍用于取消本次识别。
 后端地址默认为空，未配置时不会启动录音。普通 `tauri dev` 不显示开发者选项。
 
-客户端设置保存在系统应用配置目录中的 `com.opentypeless.client/settings.json`。
-macOS 路径为 `~/Library/Application Support/com.opentypeless.client/settings.json`，Windows 为 `%APPDATA%\com.opentypeless.client\settings.json`。
+客户端应用标识为 `pro.omnibox.open-typeless`，设置和词典统一保存在用户主目录下的
+`.open-typeless`，不依赖应用标识。macOS 设置路径为 `~/.open-typeless/settings.json`，
+Windows 为 `%USERPROFILE%\.open-typeless\settings.json`。
+旧版本使用系统应用配置目录：macOS 为
+`~/Library/Application Support/com.opentypeless.client/`，Windows 为
+`%APPDATA%\com.opentypeless.client\`。退出应用后，将旧目录中的 `settings.json`
+和 `dictionary.json` 复制到 `.open-typeless` 即可保留数据；不会自动迁移。
 保存使用临时文件并原子替换，写入失败会显示错误并保留原设置。
 启动时恢复设置；后端地址为空显示“后端地址未设置”，非空时请求 `<base_url>/health`，检查成功后才显示“就绪”。空闲时每 30 秒复查，开始录音前也会检查。
 

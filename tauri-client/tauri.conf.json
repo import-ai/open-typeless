@@ -2,10 +2,10 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Open Typeless",
   "version": "0.1.0",
-  "identifier": "com.opentypeless.client",
+  "identifier": "pro.omnibox.open-typeless",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run generate:icons && npm run dev",
+    "beforeBuildCommand": "npm run generate:icons && npm run build",
     "devUrl": "http://localhost:5173",
     "frontendDist": "dist"
   },
@@ -58,6 +58,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all"
+    "targets": "all",
+    "icon": ["icons/generated/icon.png", "icons/generated/icon.icns", "icons/generated/icon.ico"],
+    "macOS": {
+      "infoPlist": "Info.plist"
+    }
   }
 }

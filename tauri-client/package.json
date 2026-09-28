@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "tauri": "tauri",
+    "generate:icons": "tauri icon icons/icon.svg --output icons/generated",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",

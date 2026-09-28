@@ -211,18 +211,19 @@ fn default_shortcut_name() -> &'static str {
     }
 }
 
-fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn config_directory(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
-        .app_config_dir()
-        .map(|directory| directory.join("settings.json"))
+        .home_dir()
+        .map(|directory| directory.join(".open-typeless"))
         .map_err(|e| e.to_string())
 }
 
+fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    config_directory(app).map(|directory| directory.join("settings.json"))
+}
+
 fn dictionary_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|directory| directory.join("dictionary.json"))
-        .map_err(|e| e.to_string())
+    config_directory(app).map(|directory| directory.join("dictionary.json"))
 }
 
 #[tauri::command]
