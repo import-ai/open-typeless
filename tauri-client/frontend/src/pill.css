@@ -1,0 +1,35 @@
+/* Overlay styles are scoped; shadcn's body background must not cover the desktop. */
+html[data-window="pill"], html[data-window="pill-debug"],
+html[data-window="pill"] body, html[data-window="pill-debug"] body {
+  background: transparent;
+  margin: 0;
+  overflow: hidden;
+}
+.pill-stage { width: 128px; height: 32px; display: grid; place-items: center; }
+.recording-pill {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
+  align-items: center;
+  width: 128px;
+  height: 32px;
+  border-radius: 999px;
+  /* With no inset, the 1:2:1 columns put button centers at (16,16)
+     and (112,16), exactly matching the pill's semicircle centers. */
+  padding: 0;
+  background: #000;
+  color: #fff;
+}
+.recording-pill.processing { display: flex; justify-content: center; width: 32px; padding: 0; }
+.recording-pill.processing > svg { width: 20px; height: 20px; }
+.recording-pill button { justify-self: center; width: 20px; height: 20px; border-radius: 50%; padding: 0; translate: none; }
+.recording-pill button svg { width: 14px; height: 14px; }
+.recording-pill .pill-cancel { background: #454545; color: #fff; }
+.recording-pill .pill-done { background: #f2f2f2; color: #222; }
+.pill-waiting { display: grid; place-items: center; justify-self: center; width: 20px; height: 20px; }
+.recording-pill button:hover { filter: brightness(1.12); }
+.recording-pill button:active { transform: scale(.94); }
+.pill-waveform { display: block; width: 100%; height: 24px; }
+.recording-pill[data-state="disconnected"] .pill-waveform { color: #666; }
+.recording-pill[data-state="unready"] .pill-waveform { color: #999; }
+.pill-debug-gallery { display: flex; flex-direction: column; gap: 16px; padding: 16px 24px; }
+.pill-debug-label { display: table; margin: 0 0 6px; padding: 2px 7px; border-radius: 6px; background: #000b; color: white; font-size: 11px; line-height: 16px; }

@@ -96,11 +96,18 @@ fn main() {
         })
         .setup(|app| {
             bind_shortcut(app.handle(), parse_shortcut(default_shortcut_name())?)?;
+            if std::env::var_os("OPEN_TYPELESS_PILL_DEBUG").is_some() {
+                if let Some(window) = app.get_webview_window("pill-debug") {
+                    let _ = window.show();
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             start_recording,
             stop_recording,
+            cancel_recording,
+            dismiss_pill,
             transcribe_file,
             set_server_url,
             get_settings,
@@ -149,13 +156,16 @@ fn toggle_recording(app: &AppHandle) -> Result<(), String> {
         .session
         .is_some();
     if recording {
+        app.emit("recording-processing", ())
+            .map_err(|e| e.to_string())?;
         let path = stop_inner(&state)?;
         app.emit("recording-stopped", path.to_string_lossy().to_string())
             .map_err(|e| e.to_string())?;
     } else {
+        show_pill(app);
         app.emit("recording-starting", ())
             .map_err(|e| e.to_string())?;
-        start_inner(&state)?;
+        start_inner(&state, app.clone())?;
         app.emit("recording-started", ())
             .map_err(|e| e.to_string())?;
     }
@@ -163,10 +173,13 @@ fn toggle_recording(app: &AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
-    start_inner(&state)
+fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    show_pill(&app);
+    app.emit("recording-starting", ())
+        .map_err(|e| e.to_string())?;
+    start_inner(&state, app)
 }
-fn start_inner(state: &AppState) -> Result<(), String> {
+fn start_inner(state: &AppState, app: AppHandle) -> Result<(), String> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (capture_ready_tx, capture_ready_rx) = mpsc::channel();
     let (stop_tx, stop_rx) = mpsc::channel();
@@ -174,25 +187,41 @@ fn start_inner(state: &AppState) -> Result<(), String> {
     std::thread::spawn(move || {
         let result = (|| -> Result<(), String> {
             let host = cpal::default_host();
-            let device = host.default_input_device().ok_or("没有可用的麦克风")?;
+            let device = match host.default_input_device() {
+                Some(device) => device,
+                None => {
+                    let _ = app.emit("mic-state", "disconnected");
+                    return Err("没有可用的麦克风".into());
+                }
+            };
             let supported = device.default_input_config().map_err(|e| e.to_string())?;
             let sample_rate = supported.sample_rate().0;
             let channels = supported.channels();
             let samples = Arc::new(Mutex::new(Vec::new()));
             let sink = samples.clone();
             let capture_ready_once = Arc::new(AtomicBool::new(false));
-            let err_fn = |e| eprintln!("audio input error: {e}");
+            let error_events = app.clone();
+            let err_fn = move |e| {
+                eprintln!("audio input error: {e}");
+                let _ = error_events.emit("mic-state", "disconnected");
+            };
             let stream = match supported.sample_format() {
                 cpal::SampleFormat::I16 => {
                     let ready = capture_ready_tx.clone();
                     let once = capture_ready_once.clone();
+                    let events = app.clone();
                     device.build_input_stream(
                         &supported.config(),
                         move |d: &[i16], _| {
+                            let level = d.iter().map(|sample| (*sample as f64).abs()).sum::<f64>()
+                                / (d.len().max(1) as f64)
+                                / 32768.0;
+                            let _ = events.emit("mic-level", level.min(1.0));
                             if d.iter().any(|sample| *sample != 0)
                                 && !once.swap(true, Ordering::AcqRel)
                             {
                                 let _ = ready.send(());
+                                let _ = events.emit("mic-state", "ready");
                             }
                             sink.lock().unwrap().extend_from_slice(d)
                         },
@@ -203,13 +232,22 @@ fn start_inner(state: &AppState) -> Result<(), String> {
                 cpal::SampleFormat::U16 => {
                     let ready = capture_ready_tx.clone();
                     let once = capture_ready_once.clone();
+                    let events = app.clone();
                     device.build_input_stream(
                         &supported.config(),
                         move |d: &[u16], _| {
+                            let level = d
+                                .iter()
+                                .map(|sample| ((*sample as i32 - 32768).abs()) as f64)
+                                .sum::<f64>()
+                                / (d.len().max(1) as f64)
+                                / 32768.0;
+                            let _ = events.emit("mic-level", level.min(1.0));
                             if d.iter().any(|sample| *sample != 32768)
                                 && !once.swap(true, Ordering::AcqRel)
                             {
                                 let _ = ready.send(());
+                                let _ = events.emit("mic-state", "ready");
                             }
                             sink.lock()
                                 .unwrap()
@@ -222,13 +260,18 @@ fn start_inner(state: &AppState) -> Result<(), String> {
                 cpal::SampleFormat::F32 => {
                     let ready = capture_ready_tx.clone();
                     let once = capture_ready_once.clone();
+                    let events = app.clone();
                     device.build_input_stream(
                         &supported.config(),
                         move |d: &[f32], _| {
+                            let level = d.iter().map(|sample| sample.abs() as f64).sum::<f64>()
+                                / (d.len().max(1) as f64);
+                            let _ = events.emit("mic-level", level.min(1.0));
                             if d.iter().any(|sample| *sample != 0.0)
                                 && !once.swap(true, Ordering::AcqRel)
                             {
                                 let _ = ready.send(());
+                                let _ = events.emit("mic-state", "ready");
                             }
                             sink.lock()
                                 .unwrap()
@@ -241,6 +284,7 @@ fn start_inner(state: &AppState) -> Result<(), String> {
                 _ => return Err("不支持的麦克风采样格式".into()),
             }
             .map_err(|e| e.to_string())?;
+            let _ = app.emit("mic-state", "unready");
             stream.play().map_err(|e| e.to_string())?;
             capture_ready_rx
                 .recv_timeout(Duration::from_secs(3))
@@ -285,6 +329,34 @@ fn start_inner(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+fn show_pill(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("pill") {
+        let _ = window.show();
+    }
+}
+
+fn hide_pill(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("pill") {
+        let _ = window.hide();
+    }
+    let _ = app.emit("mic-state", "disconnected");
+}
+
+#[tauri::command]
+fn dismiss_pill(app: AppHandle) {
+    hide_pill(&app);
+}
+
+#[tauri::command]
+fn cancel_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if let Ok(path) = stop_inner(&state) {
+        let _ = std::fs::remove_file(path);
+    }
+    hide_pill(&app);
+    app.emit("recording-cancelled", ())
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::trim_leading_silence;
@@ -324,7 +396,9 @@ mod tests {
 }
 
 #[tauri::command]
-fn stop_recording(state: State<'_, AppState>) -> Result<String, String> {
+fn stop_recording(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    app.emit("recording-processing", ())
+        .map_err(|e| e.to_string())?;
     Ok(stop_inner(&state)?.to_string_lossy().to_string())
 }
 fn stop_inner(state: &AppState) -> Result<PathBuf, String> {
@@ -402,6 +476,7 @@ async fn transcribe_file(app: AppHandle, path: String) -> Result<String, String>
     paste_rx
         .recv_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())??;
+    hide_pill(&app);
     Ok(result.raw_text)
 }
 

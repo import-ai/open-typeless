@@ -23,14 +23,34 @@ go run ./cmd/debug-server
 ls -lh /tmp/open-typeless-debug
 ```
 
-Tauri 客户端在 `tauri-client/`，前端静态文件在 `ui/`。安装 Node、Rust 和
-Tauri 2 后运行：
+Tauri 客户端在 `tauri-client/`，React + TypeScript 前端在
+`tauri-client/frontend/`，使用 Vite、Tailwind CSS 和 shadcn/ui。
+安装 Node 22.12+、Rust 和 Tauri 2 系统依赖后运行：
 
 ```sh
 cd tauri-client
 npm install
 npm run tauri dev
 ```
+
+`tauri dev` 自动启动 Vite，前端修改通过 HMR 更新。其他开发命令：
+
+```sh
+npm run tauri:debug  # 桌面常驻展示 pill 四态
+npm run dev          # 仅启动浏览器预览，不调用麦克风
+npm run typecheck    # TypeScript 严格检查
+npm run build        # 检查类型并生成 dist/
+npm run tauri build  # 构建桌面程序（自动运行前端构建）
+```
+
+浏览器访问 `http://localhost:5173/?view=pill-debug` 可单独调整 pill。
+桌面窗口按 Tauri window label 选择 React 界面，预览参数仅用于浏览器。
+正式 pill 与 debug 共用 `frontend/src/components/recording-pill.tsx`；
+主窗口不会渲染这些预览。当前 pill 尺寸保留现有值，最终外观按 PRD 结对验收。
+
+新增 shadcn 组件：在 `tauri-client/` 运行 `npx shadcn@latest add <组件名>`。
+组件源码保存在 `frontend/src/components/ui/`。
+集成依据和目录约定见 [前端开发说明](docs/frontend.md)。
 
 客户端默认注册 `Command+Shift+Space`（macOS）或 `Control+Shift+Space`（Windows）全局热键。
 设置界面可以修改快捷键，保存后立即生效。当前 Tauri 的 `global-hotkey` 库要求快捷键包含一个主键，
