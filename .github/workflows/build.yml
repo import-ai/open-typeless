@@ -58,7 +58,7 @@ jobs:
       - name: Generate platform icons from SVG
         run: npm run generate:icons
       - name: Build installers
-        run: npm run tauri build -- --verbose --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} -- --locked
+        run: npm run tauri build -- --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} -- --locked
       - name: Upload installers
         uses: actions/upload-artifact@v7
         with:
