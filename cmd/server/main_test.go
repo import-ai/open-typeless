@@ -13,7 +13,7 @@ import (
 )
 
 func TestRecognitionForwardsDictionaryContext(t *testing.T) {
-	for _, hotwords := range []string{"", "OAuth\n赵阳\nego Lite\nAGENTS.md", strings.Repeat("a", 1000)} {
+	for _, hotwords := range []string{"", "OAuth\n语音\nego Lite\nAGENTS.md", strings.Repeat("a", 1000)} {
 		t.Run(strconv.Itoa(len(hotwords))+"_bytes", func(t *testing.T) {
 			var called atomic.Bool
 			inference := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

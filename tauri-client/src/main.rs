@@ -886,7 +886,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let dictionary_path = directory.path().join("dictionary.json");
         dictionary::upsert(&dictionary_path, None, "OAuth").unwrap();
-        let entries = dictionary::upsert(&dictionary_path, None, "赵阳").unwrap();
+        let entries = dictionary::upsert(&dictionary_path, None, "语音").unwrap();
         let mut run = TranscriptionRun::new(1);
         run.hotwords = dictionary::hotwords(&entries);
         dictionary::upsert(&dictionary_path, Some(&entries[1].id), "changed").unwrap();
@@ -923,7 +923,7 @@ mod tests {
             }
             let request = String::from_utf8(request).unwrap();
             assert!(request.starts_with("POST /api/v1/recognitions "));
-            assert!(request.contains("name=\"hotwords\"\r\n\r\n赵阳\nOAuth\r\n"));
+            assert!(request.contains("name=\"hotwords\"\r\n\r\n语音\nOAuth\r\n"));
             assert!(!request.contains("changed"));
             assert!(request.contains("test audio"));
             let body = r#"{"raw_text":"OAuth"}"#;

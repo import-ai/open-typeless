@@ -149,15 +149,15 @@ mod tests {
         let path = directory.path().join("config/dictionary.json");
         assert!(load(&path).unwrap().is_empty());
         upsert(&path, None, "  OAuth  ").unwrap();
-        let entries = upsert(&path, None, "赵阳").unwrap();
+        let entries = upsert(&path, None, "语音").unwrap();
         let snapshot = hotwords(&entries);
         let id = &entries[1].id;
         let updated = upsert(&path, Some(id), "OAUTH").unwrap();
         assert_eq!(updated[1].created_at, entries[1].created_at);
         assert_eq!(updated[1].id, *id);
         assert_eq!(load(&path).unwrap(), updated);
-        assert_eq!(snapshot, "赵阳\nOAuth");
-        assert_eq!(hotwords(&updated), "赵阳\nOAUTH");
+        assert_eq!(snapshot, "语音\nOAuth");
+        assert_eq!(hotwords(&updated), "语音\nOAUTH");
         delete(&path, &[id.clone()]).unwrap();
         assert_eq!(load(&path).unwrap().len(), 1);
         delete(&path, &[entries[0].id.clone()]).unwrap();
