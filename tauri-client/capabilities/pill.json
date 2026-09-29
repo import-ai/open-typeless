@@ -1,0 +1,1 @@
+{"$schema":"https://schema.tauri.app/config/2","identifier":"pill-drag","description":"Drag the microphone overlay by its waveform and spinner","windows":["pill"],"permissions":["core:window:allow-start-dragging"]}

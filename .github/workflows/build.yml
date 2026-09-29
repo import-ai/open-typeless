@@ -1,0 +1,94 @@
+name: Desktop build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            runner: macos-14
+            target: aarch64-apple-darwin
+            bundles: dmg
+            arch: arm64
+            extension: dmg
+          - name: macOS Intel
+            runner: macos-14
+            target: x86_64-apple-darwin
+            bundles: dmg
+            arch: amd64
+            extension: dmg
+          - name: Windows x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+            arch: amd64
+            extension: exe
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: tauri-client
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tauri-client/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tauri-client
+          key: ${{ matrix.target }}
+      - run: npm ci
+      - name: Generate platform icons from SVG
+        run: npm run generate:icons
+      - name: Build installers
+        run: npm run tauri build -- --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} -- --locked
+      - name: Prepare installer artifact
+        id: installer
+        shell: bash
+        env:
+          INSTALLER_TARGET: ${{ matrix.target }}
+          INSTALLER_BUNDLE: ${{ matrix.bundles }}
+          INSTALLER_ARCH: ${{ matrix.arch }}
+          INSTALLER_EXTENSION: ${{ matrix.extension }}
+        run: |
+          version=$(node -p "require('./tauri.conf.json').version")
+          suffix=""
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            suffix="-${GITHUB_RUN_ID}${GITHUB_RUN_ATTEMPT}"
+          fi
+          filename="open-typeless-v${version}${suffix}-${INSTALLER_ARCH}.${INSTALLER_EXTENSION}"
+          shopt -s nullglob
+          installers=("target/${INSTALLER_TARGET}/release/bundle/${INSTALLER_BUNDLE}/"*."${INSTALLER_EXTENSION}")
+          if [[ ${#installers[@]} -ne 1 ]]; then
+            echo "Expected exactly one installer, found ${#installers[@]}" >&2
+            exit 1
+          fi
+          mkdir -p target/installers
+          cp "${installers[0]}" "target/installers/${filename}"
+          echo "path=tauri-client/target/installers/${filename}" >> "$GITHUB_OUTPUT"
+      - name: Upload installers
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          if-no-files-found: error
+          path: ${{ steps.installer.outputs.path }}

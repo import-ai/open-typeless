@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1254" height="1254" viewBox="0 0 1254 1254" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Open Typeless — voice and cat</title>
+  <desc id="desc">An editable vector recreation of the app icon, with three groups: charcoal gradient background, ivory waveform, and a solid cat head peeking from the lower-left corner. The area outside the tile is transparent.</desc>
+  <defs>
+    <linearGradient id="tile-gradient" x1="360" y1="138" x2="830" y2="1136" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#272728"/>
+      <stop offset="0.42" stop-color="#19191a"/>
+      <stop offset="0.78" stop-color="#0d0e0f"/>
+      <stop offset="1" stop-color="#0b0c0d"/>
+    </linearGradient>
+    <radialGradient id="tile-light" cx="0" cy="0" r="1" gradientTransform="translate(230 220) rotate(42) scale(900 680)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff" stop-opacity="0.02"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim-light" x1="395" y1="138" x2="780" y2="1136" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#c2c2c2" stop-opacity="0.48"/>
+      <stop offset="0.25" stop-color="#959595" stop-opacity="0.19"/>
+      <stop offset="0.62" stop-color="#555555" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#9b9b9b" stop-opacity="0.23"/>
+    </linearGradient>
+    <linearGradient id="rim-edge" x1="380" y1="138" x2="795" y2="1136" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#898989" stop-opacity="0.35"/>
+      <stop offset="0.45" stop-color="#444444" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#626262" stop-opacity="0.28"/>
+    </linearGradient>
+    <linearGradient id="ivory" x1="270" y1="355" x2="850" y2="1090" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fefdfb"/>
+      <stop offset="1" stop-color="#fdfcf9"/>
+    </linearGradient>
+    <filter id="rim-soften" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="2.7"/>
+    </filter>
+    <clipPath id="tile-clip">
+      <rect x="113" y="138" width="1026" height="998" rx="220"/>
+    </clipPath>
+  </defs>
+
+  <!-- 1. Gradient background: soft inner rim highlights without a hard outline; transparent outside. -->
+  <g id="background" clip-path="url(#tile-clip)">
+    <rect x="113" y="138" width="1026" height="998" rx="220" fill="url(#tile-gradient)"/>
+    <rect x="113" y="138" width="1026" height="998" rx="220" fill="url(#tile-light)"/>
+    <rect x="122" y="147" width="1008" height="980" rx="211" stroke="url(#rim-light)" stroke-width="6" filter="url(#rim-soften)"/>
+    <rect x="114.5" y="139.5" width="1023" height="995" rx="218.5" stroke="url(#rim-edge)" stroke-width="3"/>
+  </g>
+
+  <!-- 2. Waveform: five separate rounded rectangles aligned to the original PNG coordinates. -->
+  <g id="waveform" fill="url(#ivory)">
+    <rect x="268.5" y="558.5" width="97.5" height="196" rx="48.75"/>
+    <rect x="423.5" y="466.5" width="97" height="378" rx="48.5"/>
+    <rect x="578" y="355.5" width="96" height="592" rx="48"/>
+    <rect x="731.5" y="466.5" width="97" height="378" rx="48.5"/>
+    <rect x="885.5" y="558.5" width="97.5" height="196" rx="48.75"/>
+  </g>
+
+  <!-- 3. Lower-left cat head: follows the original ear tips, forehead, and right cheek, without facial features. -->
+  <g id="cat-head" clip-path="url(#tile-clip)" fill="url(#ivory)">
+    <path d="M 125 991
+      C 135 973 145 959 155 948
+      C 164 910 178 850 199 840
+      C 222 827 244 868 276 924
+      C 310 924 345 934 381 948
+      C 413 927 451 906 469 905
+      C 501 901 493 933 487 960
+      C 481 983 473 1005 469 1020
+      C 472 1041 484 1076 474 1110
+      C 471 1124 465 1138 460 1150
+      L 460 1190 L 65 1190 L 65 1020 Z"/>
+    <!-- The fine dark line along the bottom matches the base edge in the original image. -->
+    <rect x="115" y="140" width="1022" height="994" rx="218" fill="none" stroke="#242425" stroke-opacity="0.45" stroke-width="2"/>
+  </g>
+</svg>

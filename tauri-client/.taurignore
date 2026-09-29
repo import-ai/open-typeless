@@ -1,0 +1,3 @@
+# Vite handles frontend changes with HMR; don't restart the Rust process.
+frontend/
+dist/

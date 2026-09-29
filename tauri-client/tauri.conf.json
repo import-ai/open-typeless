@@ -1,0 +1,67 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Open Typeless",
+  "version": "0.1.0",
+  "identifier": "pro.omnibox.open-typeless",
+  "build": {
+    "beforeDevCommand": "npm run generate:icons && npm run dev",
+    "beforeBuildCommand": "npm run generate:icons && npm run build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Open Typeless",
+        "titleBarStyle": "Transparent",
+        "backgroundColor": "#ffffff",
+        "theme": "Light",
+        "width": 420,
+        "height": 680,
+        "resizable": false
+      },
+      {
+        "label": "pill",
+        "acceptFirstMouse": true,
+        "focusable": false,
+        "title": "Open Typeless microphone",
+        "width": 128,
+        "height": 32,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "shadow": false
+      },
+      {
+        "label": "pill-debug",
+        "title": "Open Typeless pill states",
+        "width": 300,
+        "height": 384,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "shadow": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/generated/icon.png", "icons/generated/icon.icns", "icons/generated/icon.ico"],
+    "macOS": {
+      "infoPlist": "Info.plist"
+    }
+  }
+}

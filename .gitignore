@@ -1,0 +1,71 @@
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment and local configuration
+.env
+.env.*
+!.env.example
+
+# Logs and runtime output
+*.log
+*.pid
+*.seed
+*.pid.lock
+
+# Go
+bin/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Rust / Tauri
+target/
+**/target/
+tauri-client/icons/generated/
+
+# Node.js / frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dist/
+build/
+.parcel-cache/
+.turbo/
+.vite/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+ENV/
+
+# Local temporary files
+tmp/
+temp/
+
+# Local documentation assets and archives
+/docs/assets/
+/docs/archive/
+
+# Local ASR deployment assets (downloaded models and source)
+/deploy
+/prd.md
+/cmd/debug-server/
