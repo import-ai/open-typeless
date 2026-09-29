@@ -25,17 +25,20 @@ jobs:
             runner: macos-14
             target: aarch64-apple-darwin
             bundles: dmg
-            artifact: macos-arm64
+            arch: arm64
+            extension: dmg
           - name: macOS Intel
             runner: macos-14
             target: x86_64-apple-darwin
             bundles: dmg
-            artifact: macos-x64
+            arch: amd64
+            extension: dmg
           - name: Windows x64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
-            bundles: nsis,msi
-            artifact: windows-x64
+            bundles: nsis
+            arch: amd64
+            extension: exe
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -59,12 +62,33 @@ jobs:
         run: npm run generate:icons
       - name: Build installers
         run: npm run tauri build -- --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} -- --locked
+      - name: Prepare installer artifact
+        id: installer
+        shell: bash
+        env:
+          INSTALLER_TARGET: ${{ matrix.target }}
+          INSTALLER_BUNDLE: ${{ matrix.bundles }}
+          INSTALLER_ARCH: ${{ matrix.arch }}
+          INSTALLER_EXTENSION: ${{ matrix.extension }}
+        run: |
+          version=$(node -p "require('./tauri.conf.json').version")
+          suffix=""
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            suffix="-${GITHUB_RUN_ID}${GITHUB_RUN_ATTEMPT}"
+          fi
+          filename="open-typeless-v${version}${suffix}-${INSTALLER_ARCH}.${INSTALLER_EXTENSION}"
+          shopt -s nullglob
+          installers=("target/${INSTALLER_TARGET}/release/bundle/${INSTALLER_BUNDLE}/"*."${INSTALLER_EXTENSION}")
+          if [[ ${#installers[@]} -ne 1 ]]; then
+            echo "Expected exactly one installer, found ${#installers[@]}" >&2
+            exit 1
+          fi
+          mkdir -p target/installers
+          cp "${installers[0]}" "target/installers/${filename}"
+          echo "path=tauri-client/target/installers/${filename}" >> "$GITHUB_OUTPUT"
       - name: Upload installers
         uses: actions/upload-artifact@v7
         with:
-          name: open-typeless-${{ matrix.artifact }}
+          archive: false
           if-no-files-found: error
-          path: |
-            tauri-client/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
-            tauri-client/target/${{ matrix.target }}/release/bundle/nsis/*.exe
-            tauri-client/target/${{ matrix.target }}/release/bundle/msi/*.msi
+          path: ${{ steps.installer.outputs.path }}

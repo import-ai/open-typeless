@@ -73,8 +73,14 @@ The complete dictionary is limited to **1000 UTF-8 bytes**, including separators
 
 GitHub Actions runs for pull requests, pushes to `main`, `v*` tag pushes, and manual triggers:
 
-- **Desktop build** uses GitHub-hosted runners to build DMGs for macOS Apple Silicon / Intel and NSIS EXE / MSI installers for Windows x64. Download `open-typeless-macos-arm64`, `open-typeless-macos-x64`, or `open-typeless-windows-x64` from the run's **Artifacts**. Developer ID signing, notarization, and Windows code signing are not configured yet.
+- **Desktop build** uses GitHub-hosted runners to build DMGs for macOS Apple Silicon / Intel and an NSIS EXE installer for Windows x64. Download installers directly from the run's **Artifacts**, without a ZIP wrapper. Developer ID signing, notarization, and Windows code signing are not configured yet.
 - **Server build** runs Go tests and vet, then builds images for `linux/amd64` and `linux/arm64`. Pull requests only build the images; other triggers use `GITHUB_TOKEN` to push to `ghcr.io/import-ai/open-typeless`, without Docker Hub credentials. The `main` branch produces `:main`; for example, the `v0.1.0` tag produces `:0.1.0`, `:0.1`, and `:latest` (prereleases do not update `latest`). Manual runs use the selected branch or version tag.
+
+Desktop installer names use the version from `tauri-client/tauri.conf.json` and the architecture names `arm64` or `amd64`:
+
+- Builds on `v*` tags use `open-typeless-v<version>-<arch>.<extension>`.
+- Other builds use `open-typeless-v<version>-<run_id><attempt_id>-<arch>.<extension>`, concatenating `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` without a separator.
+- macOS uses `.dmg`; Windows uses `.exe`. For example, release installers are `open-typeless-v0.1.0-arm64.dmg`, `open-typeless-v0.1.0-amd64.dmg`, and `open-typeless-v0.1.0-amd64.exe`.
 
 Before releasing the client, synchronize the application version in `tauri-client/tauri.conf.json`, `tauri-client/Cargo.toml`, and `tauri-client/Cargo.lock`. Maintain the server health-check version in `internal/buildinfo/version.go`.
 

@@ -14,11 +14,11 @@ Download the installer for your computer from a successful [Desktop build](https
 
 | Computer | Download | Installer |
 | --- | --- | --- |
-| Mac with Apple Silicon | `open-typeless-macos-arm64` | DMG |
-| Mac with an Intel processor | `open-typeless-macos-x64` | DMG |
-| Windows x64 PC | `open-typeless-windows-x64` | EXE or MSI |
+| Mac with Apple Silicon | `open-typeless-v<version>-arm64.dmg` | DMG |
+| Mac with an Intel processor | `open-typeless-v<version>-amd64.dmg` | DMG |
+| Windows x64 PC | `open-typeless-v<version>-amd64.exe` | EXE |
 
-Extract the download, open the installer, and install Open Typeless. Current builds are unsigned, so your operating system may show a security prompt.
+Non-release builds include the workflow run ID immediately followed by its attempt number, for example `open-typeless-v0.1.0-1234561-arm64.dmg` for run `123456`, attempt `1`. Download and open the installer directly to install Open Typeless. Current builds are unsigned, so your operating system may show a security prompt.
 
 ## Set up
 
