@@ -32,6 +32,10 @@ type recognitionResponse struct {
 }
 
 func main() {
+	apiKey, err := backendAPIKeyFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
 	polish, err := polisherFromEnv()
 	if err != nil {
 		log.Fatal(err)
@@ -47,12 +51,16 @@ func main() {
 	if s.inferenceProtocol != "legacy" && s.inferenceProtocol != "audiocpp" {
 		log.Fatal("INFERENCE_PROTOCOL must be legacy or audiocpp")
 	}
+	addr := env("HTTP_ADDR", ":8080")
+	log.Printf("open-typeless business server listening on %s, inference=%s", addr, s.inferenceURL)
+	log.Fatal(http.ListenAndServe(addr, s.handler(apiKey)))
+}
+
+func (s *server) handler(apiKey string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", s.health)
 	mux.HandleFunc("/api/v1/recognitions", s.recognize)
-	addr := env("HTTP_ADDR", ":8080")
-	log.Printf("open-typeless business server listening on %s, inference=%s", addr, s.inferenceURL)
-	log.Fatal(http.ListenAndServe(addr, logging(cors(mux))))
+	return logging(cors(requireAPIKey(apiKey, mux)))
 }
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
@@ -179,7 +187,8 @@ func writeError(w http.ResponseWriter, status int, message string) {
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

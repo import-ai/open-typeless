@@ -24,6 +24,35 @@ npm run tauri build # Desktop build; builds the frontend automatically
 
 Add shadcn components by running `npx shadcn@latest add <component>` from `tauri-client/`. Component source lives in `frontend/src/components/ui/`. See the [frontend development guide](frontend.md) for integration rationale and directory conventions.
 
+## Backend authentication
+
+The Go Business Server requires `BACKEND_API_KEY`; startup fails if it is empty
+or contains spaces, control characters, or non-ASCII characters. Generate a
+random key (for example, `openssl rand -hex 32`) and supply it through a private
+environment file or your service manager. With the key exported, run
+`go run ./cmd/server` using the ASR/LLM configuration for your deployment.
+`BACKEND_API_KEY` is separate from `LLM_API_KEY`, which authenticates Go to an
+upstream LLM.
+
+Both `/api/v1/health` and `/api/v1/recognitions` require
+`Authorization: Bearer <key>`. Missing or incorrect keys return HTTP 401 before
+reading uploaded audio or calling inference. Only CORS preflight is anonymous.
+Keys in query parameters are not accepted. Use HTTPS for public deployments;
+HTTP does not encrypt the key or recordings.
+
+The desktop settings tab saves the API base URL and key together. Requests use
+the saved key for health checks and uploads, and report 401/403 as an API key
+error. A recording captures a URL/key snapshot; settings changes affect the
+next recording. HTTP redirects are rejected. Input fields suspend the activation
+shortcut while focused, and the key field masks its value. Browser previews
+keep the key in memory only.
+
+The desktop key is stored unencrypted in `~/.open-typeless/settings.json`
+(or `%USERPROFILE%\.open-typeless\settings.json` on Windows), using the existing
+atomic settings writes. Do not share this file. Older settings files load with
+an empty key and retain their other preferences. The local debug server remains
+unauthenticated and is intended only for local testing.
+
 ## Debug recording uploads
 
 The optional `cmd/debug-server` tool is kept locally and is not included in a fresh Git checkout. If it is available in your workspace, use it as follows.
@@ -45,7 +74,7 @@ The pill initially appears centered horizontally on the main screen, with its bo
 
 ## Shortcut and recognition behavior
 
-The macOS default shortcut is `RCommand`: press and release right Command by itself to start recording, then repeat to stop and recognize. Using another key, modifier, or mouse click while holding it cancels that shortcut activation, so combinations such as right Command+C do not start recording. Native AppKit local and global event listeners implement this behavior and require accessibility permission. The UI shows a prompt if permission is missing; restart the application after granting it. Windows defaults to standalone right Control (`RControl`), detected through a native keyboard listener. In settings, capture a single key or a conventional key combination; it takes effect on release. The shortcut and backend URL are saved automatically and restored at the next launch.
+The macOS default shortcut is `RCommand`: press and release right Command by itself to start recording, then repeat to stop and recognize. Using another key, modifier, or mouse click while holding it cancels that shortcut activation, so combinations such as right Command+C do not start recording. Native AppKit local and global event listeners implement this behavior and require accessibility permission. The UI shows a prompt if permission is missing; restart the application after granting it. Windows defaults to standalone right Control (`RControl`), detected through a native keyboard listener. In settings, capture a single key or a conventional key combination; it takes effect on release. The shortcut, backend URL, and API key are saved automatically and restored at the next launch.
 
 After recording stops, the client creates a temporary WAV and uploads it to the Business Server. It writes nonempty `polished_text` to the clipboard, falling back to `raw_text` when the field is absent, null, or blank, and simulates `Ctrl/Command+V` to paste into the current window. The server URL is empty by default. Enter a backend address in the main window's settings tab; pressing Enter or moving focus saves it automatically. Use `http://127.0.0.1:8080/api/v1` for a local service or, for example, `https://example.com/api/v1` behind a reverse proxy. The client treats this as the complete API base URL and appends only `/recognitions` for recognition requests.
 

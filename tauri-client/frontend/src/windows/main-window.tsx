@@ -8,7 +8,7 @@ import { Kbd } from '@/components/ui/kbd'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ShortcutRecorder } from '@/components/shortcut-recorder'
-import { Input } from '@/components/ui/input'
+import { BackendSettingsFields } from '@/components/backend-settings-fields'
 import { useTauriEvent } from '@/hooks/use-tauri-event'
 import { commands, desktop, micLabels, type MicState, type RecordingFile } from '@/lib/desktop'
 
@@ -26,6 +26,12 @@ export function MainWindow() {
   const [shortcut, setShortcut] = useState(desktop ? '' : previewShortcut)
   const [serverUrl, setServerUrl] = useState('')
   const savedServerUrl = useRef('')
+  const [apiKey, setApiKey] = useState('')
+  const savedApiKey = useRef('')
+  const [configuredApiKey, setConfiguredApiKey] = useState('')
+  const savingBackend = useRef(false)
+  const backendInputActive = useRef(false)
+  const onBackendInputActiveChange = useCallback((active: boolean) => { backendInputActive.current = active }, [])
   const [configuredServerUrl, setConfiguredServerUrl] = useState('')
   const [connection, setConnection] = useState<'checking' | 'ready' | 'error'>('checking')
   const [connectionError, setConnectionError] = useState('')
@@ -48,6 +54,9 @@ export function MainWindow() {
       if (!active) return
       setShortcut(settings.shortcut)
       setServerUrl(settings.server_url)
+      setApiKey(settings.api_key)
+      savedApiKey.current = settings.api_key
+      setConfiguredApiKey(settings.api_key)
       savedServerUrl.current = settings.server_url
       setConfiguredServerUrl(settings.server_url)
       setDeveloperOptions(settings.developer_options)
@@ -64,7 +73,7 @@ export function MainWindow() {
     setConnection('checking')
     const check = async () => {
       try {
-        await commands.checkServer(configuredServerUrl)
+        await commands.checkServer(configuredServerUrl, configuredApiKey)
         if (active) setConnection('ready')
       } catch (error) {
         if (active) { setConnection('error'); setConnectionError(error instanceof Error ? error.message : String(error)) }
@@ -73,14 +82,14 @@ export function MainWindow() {
     }
     void check()
     return () => { active = false; clearTimeout(timer) }
-  }, [configuredServerUrl, phase])
+  }, [configuredServerUrl, configuredApiKey, phase])
 
   const idleStatus = !configuredServerUrl ? '后端地址未设置'
     : connection === 'checking' ? '正在检查后端连接…'
     : connection === 'error' ? connectionError : status
 
   async function start() {
-    if (busy.current || phaseRef.current !== 'idle') return
+    if (savingBackend.current || busy.current || phaseRef.current !== 'idle') return
     if (!savedServerUrl.current) { setStatus('后端地址未设置'); return }
     const current = ++epoch.current
     busy.current = true
@@ -88,8 +97,6 @@ export function MainWindow() {
     setMic('unready')
     setStatus('等待麦克风输出…')
     try {
-      await commands.checkServer(savedServerUrl.current)
-      if (epoch.current !== current) return
       await commands.start()
       if (epoch.current !== current) return
       changePhase('recording')
@@ -138,7 +145,7 @@ export function MainWindow() {
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [])
   useTauriEvent('toggle-requested', () => {
-    if (!capturingShortcutRef.current && !dictionaryInputActive.current) void (phaseRef.current === 'recording' ? stop() : start())
+    if (!capturingShortcutRef.current && !dictionaryInputActive.current && !backendInputActive.current) void (phaseRef.current === 'recording' ? stop() : start())
   })
   useTauriEvent('stop-requested', () => { void stop() })
   useTauriEvent('cancel-requested', () => { void cancel() })
@@ -159,24 +166,30 @@ export function MainWindow() {
     finally { setSaving(false) }
   }
 
-  async function saveServerUrl() {
+  async function saveBackend() {
     const value = serverUrl.trim().replace(/\/+$/, '')
-    if (value === savedServerUrl.current) return
+    const key = apiKey.trim()
+    if (savingBackend.current || (value === savedServerUrl.current && key === savedApiKey.current)) return
+    savingBackend.current = true
     setSavingServer(true)
     try {
       if (value) {
         const parsed = new URL(value)
         if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname || parsed.search || parsed.hash || parsed.username || parsed.password) throw new Error('请输入有效的 HTTP 或 HTTPS 后端地址')
       }
-      if (desktop) await commands.serverUrl(value)
+      if (/[^\x21-\x7e]/.test(key)) throw new Error('API key 只能包含无空格的可打印 ASCII 字符')
+      if (desktop) await commands.backendSettings(value, key)
       savedServerUrl.current = value
+      savedApiKey.current = key
+      setApiKey(key)
+      setConfiguredApiKey(key)
       setConnection('checking')
       setConfiguredServerUrl(value)
       setStatus('就绪')
       setServerUrl(value)
-      setServerStatus(value ? '后端地址已保存' : '后端地址未设置')
+      setServerStatus(value ? '后端设置已保存' : '后端地址未设置')
     } catch (error) { setServerStatus(String(error)) }
-    finally { setSavingServer(false) }
+    finally { savingBackend.current = false; setSavingServer(false) }
   }
 
   return <main className="mx-auto flex max-w-xl flex-col gap-5 p-6">
@@ -229,21 +242,16 @@ export function MainWindow() {
           />
         </div>
       </section>
-      <div className="space-y-2">
-        <h2 id="server-url-label" className="text-sm font-medium">后端地址</h2>
-        <Input
-          aria-labelledby="server-url-label"
-          aria-describedby="server-url-help"
-          type="url"
-          value={serverUrl}
-          placeholder="https://example.com/api/v1"
-          disabled={(desktop && !loaded) || savingServer || phase !== 'idle'}
-          onChange={event => { setServerUrl(event.target.value); setServerStatus('') }}
-          onBlur={() => { void saveServerUrl() }}
-          onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
-        />
-        <p id="server-url-help" role="status" className="text-xs text-muted-foreground">{serverStatus || '按回车或移开焦点自动保存。'}</p>
-      </div>
+      <BackendSettingsFields
+        serverUrl={serverUrl}
+        apiKey={apiKey}
+        disabled={(desktop && !loaded) || savingServer || phase !== 'idle'}
+        status={serverStatus}
+        onServerUrlChange={value => { setServerUrl(value); setServerStatus('') }}
+        onApiKeyChange={value => { setApiKey(value); setServerStatus('') }}
+        onSave={() => { void saveBackend() }}
+        onInputActiveChange={onBackendInputActiveChange}
+      />
       {settingsWarning && <p role="status" className="mt-3 text-xs text-destructive">{settingsWarning}</p>}
     </section>
     {developerOptions && <DeveloperOptions disabled={phase !== 'idle' || capturingShortcut} />}

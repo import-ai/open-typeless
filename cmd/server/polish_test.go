@@ -15,6 +15,9 @@ import (
 func TestRecognitionPolishesAfterASR(t *testing.T) {
 	var asrDone atomic.Bool
 	inference := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Error("backend credential forwarded to ASR")
+		}
 		asrDone.Store(true)
 		io.WriteString(w, `{"raw_text":"嗯明天下午三点开会","language":"zh","audio_duration_ms":1234}`)
 	}))
@@ -47,7 +50,9 @@ func TestRecognitionPolishesAfterASR(t *testing.T) {
 	s := &server{inferenceURL: inference.URL, client: inference.Client(), maxBytes: 12 << 20,
 		polisher: &polisher{baseURL: llm.URL + "/v1", model: "test-model", apiKey: "test-key", timeout: time.Second, client: llm.Client()}}
 	w := httptest.NewRecorder()
-	s.recognize(w, recognitionRequest(t, "OAuth"))
+	r := recognitionRequest(t, "OAuth")
+	r.Header.Set("Authorization", "Bearer backend-test-key")
+	s.handler("backend-test-key").ServeHTTP(w, r)
 	var result recognitionResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
