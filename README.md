@@ -6,7 +6,7 @@ Speak, then insert the recognized text into the app you are using. Open Typeless
 - Add frequently used terms to your personal dictionary to help recognition.
 - Move the floating recording indicator or press Esc to cancel.
 
-Recognition happens after you finish speaking. Open Typeless requires a configured recognition service; ask the person running it for a backend URL, or follow the [server setup guide](docs/deployment.md) to host your own. Recordings and dictionary terms are sent to that service for recognition.
+Recognition happens after you finish speaking. Open Typeless requires a configured recognition service; ask the person running it for a backend URL. Recordings and dictionary terms are sent to that service for recognition.
 
 ## Install
 
@@ -55,5 +55,4 @@ Dictionary terms help guide recognition, but do not guarantee an exact match. If
 ## For developers and service operators
 
 - [Development, debugging, and builds](docs/development.md)
-- [Server deployment and API](docs/deployment.md)
 - [Frontend development](docs/frontend.md)

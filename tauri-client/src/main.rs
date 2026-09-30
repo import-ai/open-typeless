@@ -83,6 +83,17 @@ struct RecordingFile {
 #[derive(Deserialize)]
 struct Recognition {
     raw_text: String,
+    #[serde(default)]
+    polished_text: Option<String>,
+}
+
+impl Recognition {
+    fn output_text(&self) -> &str {
+        self.polished_text
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(&self.raw_text)
+    }
 }
 #[derive(Serialize)]
 struct Settings {
@@ -768,6 +779,19 @@ mod tests {
     use super::trim_leading_silence;
 
     #[test]
+    fn recognition_prefers_polished_text_and_supports_older_servers() {
+        for (body, expected) in [
+            (r#"{"raw_text":"raw","polished_text":"Polished."}"#, "Polished."),
+            (r#"{"raw_text":"raw"}"#, "raw"),
+            (r#"{"raw_text":"raw","polished_text":null}"#, "raw"),
+            (r#"{"raw_text":"raw","polished_text":"  "}"#, "raw"),
+        ] {
+            let result: super::Recognition = serde_json::from_str(body).unwrap();
+            assert_eq!(result.output_text(), expected);
+        }
+    }
+
+    #[test]
     fn trims_leading_silence_and_keeps_pre_roll() {
         let sample_rate = 48_000;
         let channels = 2;
@@ -1036,7 +1060,7 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<String, 
         let url = recognition_url(&base)?;
         let result = recognize_for_run(&run, url, &file.path).await?;
         run.check()?;
-        let text = result.raw_text.clone();
+        let text = result.output_text().to_owned();
         let paste_app = app.clone();
         let paste_run = run.clone();
         let (paste_tx, paste_rx) = tokio::sync::oneshot::channel();
@@ -1074,7 +1098,7 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<String, 
         })
         .map_err(|e| e.to_string())?;
         paste_rx.await.map_err(|e| e.to_string())??;
-        Ok(result.raw_text)
+        Ok(result.output_text().to_owned())
     }
     .await;
     let _ = tokio::fs::remove_file(&file.path).await;

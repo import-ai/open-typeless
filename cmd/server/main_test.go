@@ -32,7 +32,7 @@ func TestRecognitionForwardsDictionaryContext(t *testing.T) {
 			s := &server{inferenceURL: inference.URL, client: inference.Client(), maxBytes: 12 << 20}
 			response := httptest.NewRecorder()
 			s.recognize(response, recognitionRequest(t, hotwords))
-			if !called.Load() || response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"raw_text":"OAuth"`) {
+			if !called.Load() || response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"raw_text":"OAuth"`) || !strings.Contains(response.Body.String(), `"polished_text":"OAuth"`) {
 				t.Fatalf("recognition failed: %d %s", response.Code, response.Body.String())
 			}
 		})

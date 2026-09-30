@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -17,9 +16,12 @@ import (
 )
 
 type server struct {
-	inferenceURL string
-	client       *http.Client
-	maxBytes     int64
+	inferenceURL      string
+	inferenceProtocol string
+	inferenceModel    string
+	polisher          *polisher
+	client            *http.Client
+	maxBytes          int64
 }
 
 type recognitionResponse struct {
@@ -30,10 +32,20 @@ type recognitionResponse struct {
 }
 
 func main() {
+	polish, err := polisherFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
 	s := &server{
-		inferenceURL: strings.TrimRight(env("INFERENCE_URL", "http://localhost:18080"), "/"),
-		client:       &http.Client{Timeout: 45 * time.Second},
-		maxBytes:     envInt64("MAX_AUDIO_BYTES", 12<<20),
+		inferenceURL:      strings.TrimRight(env("INFERENCE_URL", "http://localhost:18080"), "/"),
+		inferenceProtocol: env("INFERENCE_PROTOCOL", "legacy"),
+		inferenceModel:    env("INFERENCE_MODEL", "r2t2-asr"),
+		polisher:          polish,
+		client:            &http.Client{Timeout: 45 * time.Second},
+		maxBytes:          envInt64("MAX_AUDIO_BYTES", 12<<20),
+	}
+	if s.inferenceProtocol != "legacy" && s.inferenceProtocol != "audiocpp" {
+		log.Fatal("INFERENCE_PROTOCOL must be legacy or audiocpp")
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", s.health)
@@ -60,7 +72,8 @@ func (s *server) recognize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "multipart form is invalid")
 		return
 	}
-	file, _, err := r.FormFile("audio")
+	defer r.MultipartForm.RemoveAll()
+	file, header, err := r.FormFile("audio")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "audio field is required")
 		return
@@ -81,19 +94,13 @@ func (s *server) recognize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	queryValues := url.Values{"language": {language}}
-	if contextText != "" {
-		queryValues.Set("context", contextText)
-	}
-	query := "?" + queryValues.Encode()
 	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.inferenceURL+"/transcribe"+query, strings.NewReader(string(audio)))
+	req, err := s.inferenceRequest(ctx, audio, header.Filename, language, contextText)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to build inference request")
 		return
 	}
-	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := s.client.Do(req)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "inference server unavailable")
@@ -106,16 +113,46 @@ func (s *server) recognize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var asr struct {
-		RawText         string `json:"raw_text"`
-		Language        string `json:"language"`
-		AudioDurationMS int    `json:"audio_duration_ms"`
-		ProcessingMS    int    `json:"processing_ms"`
+		RawText         string  `json:"raw_text"`
+		Language        string  `json:"language"`
+		AudioDurationMS int     `json:"audio_duration_ms"`
+		ProcessingMS    int     `json:"processing_ms"`
+		Text            *string `json:"text"`
+		Timing          struct {
+			AudioDurationMS float64 `json:"audio_duration_ms"`
+		} `json:"timing"`
 	}
 	if err := json.Unmarshal(body, &asr); err != nil {
 		writeError(w, http.StatusBadGateway, "invalid inference response")
 		return
 	}
-	writeJSON(w, http.StatusOK, recognitionResponse{RawText: asr.RawText, PolishedText: asr.RawText, Language: asr.Language, DurationMS: asr.AudioDurationMS})
+	if s.inferenceProtocol == "audiocpp" {
+		if asr.Text == nil {
+			writeError(w, http.StatusBadGateway, "invalid inference response")
+			return
+		}
+		asr.RawText = *asr.Text
+		asr.AudioDurationMS = int(asr.Timing.AudioDurationMS + 0.5)
+		if asr.Language == "" {
+			asr.Language = language
+		}
+	}
+	polished := asr.RawText
+	if s.polisher != nil && strings.TrimSpace(asr.RawText) != "" && r.Context().Err() == nil {
+		// Polishing has its own budget, independent of the ASR timeout.
+		text, err := s.polisher.polish(r.Context(), asr.RawText)
+		if err != nil {
+			if r.Context().Err() == nil {
+				log.Printf("polishing failed; returning raw transcript: %v", err)
+			}
+		} else {
+			polished = text
+		}
+	}
+	if r.Context().Err() != nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, recognitionResponse{RawText: asr.RawText, PolishedText: polished, Language: asr.Language, DurationMS: asr.AudioDurationMS})
 }
 
 func env(k, fallback string) string {
