@@ -1,6 +1,6 @@
 # Development guide
 
-This guide covers local development, debugging, implementation details, and release builds. For everyday use, see the [README](../README.md). For server setup and API details, see [deployment](deployment.md).
+This guide covers local development, debugging, implementation details, and release builds. For everyday use, see the [README](../README.md).
 
 ## Run the desktop client
 
@@ -24,7 +24,51 @@ npm run tauri build # Desktop build; builds the frontend automatically
 
 Add shadcn components by running `npx shadcn@latest add <component>` from `tauri-client/`. Component source lives in `frontend/src/components/ui/`. See the [frontend development guide](frontend.md) for integration rationale and directory conventions.
 
+## Backend authentication
+
+The Go Business Server requires `BACKEND_API_KEY`; startup fails if it is empty
+or contains spaces, control characters, or non-ASCII characters. Generate a
+random key (for example, `openssl rand -hex 32`) and supply it through a private
+environment file or your service manager. With the key exported, run
+`go run ./cmd/server` using the ASR/LLM configuration for your deployment.
+`BACKEND_API_KEY` is separate from `LLM_API_KEY`, which authenticates Go to an
+upstream LLM.
+`LLM_PROMPT_FILE` optionally points to a JSON file containing the polishing
+messages. The file uses the same message array as
+[`cmd/server/polish_messages.json`](../cmd/server/polish_messages.json) and is
+loaded once at startup; when unset, the embedded system prompt and Few-Shot
+messages are used.
+
+Both `/api/v1/health` and `/api/v1/recognitions` require
+`Authorization: Bearer <key>`. Missing or incorrect keys return HTTP 401 before
+reading uploaded audio or calling inference. Only CORS preflight is anonymous.
+Keys in query parameters are not accepted. Use HTTPS for public deployments;
+HTTP does not encrypt the key or recordings.
+
+The desktop settings tab saves the API base URL and key together. Requests use
+the saved key for health checks and uploads, and report 401/403 as an API key
+error. A recording captures a URL/key snapshot; settings changes affect the
+next recording. HTTP redirects are rejected. Input fields suspend the activation
+shortcut while focused, and the key field masks its value. Browser previews
+keep the key in memory only.
+
+The desktop key is stored unencrypted in `~/.open-typeless/settings.json`
+(or `%USERPROFILE%\.open-typeless\settings.json` on Windows), using the existing
+atomic settings writes. Do not share this file. Older settings files load with
+an empty key and retain their other preferences. The local debug server remains
+unauthenticated and is intended only for local testing.
+
 ## Debug recording uploads
+
+On macOS, signed builds enable Hardened Runtime and require both the
+`NSMicrophoneUsageDescription` in `tauri-client/Info.plist` and the
+`com.apple.security.device.audio-input` entitlement in
+`tauri-client/Entitlements.plist`. The Tauri macOS bundle configuration includes
+the entitlements file, and CI checks the signed app before uploading installers.
+To inspect an installed build, run
+`codesign --display --entitlements - "/Applications/Open Typeless.app"`.
+The output must include the audio-input entitlement set to `true`; a usage
+description alone is insufficient. Microphone access still requires user consent.
 
 The optional `cmd/debug-server` tool is kept locally and is not included in a fresh Git checkout. If it is available in your workspace, use it as follows.
 
@@ -45,9 +89,9 @@ The pill initially appears centered horizontally on the main screen, with its bo
 
 ## Shortcut and recognition behavior
 
-The macOS default shortcut is `RCommand`: press and release right Command by itself to start recording, then repeat to stop and recognize. Using another key, modifier, or mouse click while holding it cancels that shortcut activation, so combinations such as right Command+C do not start recording. Native AppKit local and global event listeners implement this behavior and require accessibility permission. The UI shows a prompt if permission is missing; restart the application after granting it. Windows defaults to standalone right Control (`RControl`), detected through a native keyboard listener. In settings, capture a single key or a conventional key combination; it takes effect on release. The shortcut and backend URL are saved automatically and restored at the next launch.
+The macOS default shortcut is `RCommand`: press and release right Command by itself to start recording, then repeat to stop and recognize. Using another key, modifier, or mouse click while holding it cancels that shortcut activation, so combinations such as right Command+C do not start recording. Native AppKit local and global event listeners implement this behavior and require accessibility permission. The UI shows a prompt if permission is missing; restart the application after granting it. Windows defaults to standalone right Control (`RControl`), detected through a native keyboard listener. In settings, capture a single key or a conventional key combination; it takes effect on release. The shortcut, backend URL, and API key are saved automatically and restored at the next launch.
 
-After recording stops, the client creates a temporary WAV and uploads it to the Business Server. It writes the returned `raw_text` to the clipboard and simulates `Ctrl/Command+V` to paste into the current window. The server URL is empty by default. Enter a backend address in the main window's settings tab; pressing Enter or moving focus saves it automatically. Use `http://127.0.0.1:8080/api/v1` for a local service or, for example, `https://example.com/api/v1` behind a reverse proxy. The client treats this as the complete API base URL and appends only `/recognitions` for recognition requests.
+After recording stops, the client creates a temporary WAV and uploads it to the Business Server. It writes nonempty `polished_text` to the clipboard, falling back to `raw_text` when the field is absent, null, or blank, and simulates `Ctrl/Command+V` to paste into the current window. The server URL is empty by default. Enter a backend address in the main window's settings tab; pressing Enter or moving focus saves it automatically. Use `http://127.0.0.1:8080/api/v1` for a local service or, for example, `https://example.com/api/v1` behind a reverse proxy. The client treats this as the complete API base URL and appends only `/recognitions` for recognition requests.
 
 Shortcut capture starts only when the input itself is clicked. Press the desired keys and release them to apply the shortcut without a save button. Ordinary single keys and standalone left/right Command, Ctrl, Shift, and Alt are supported, as are modifier-plus-key combinations. Click elsewhere to cancel capture. Esc can also be the activation key, but it still cancels recognition while the pill is visible. Recording is disabled until the backend URL is configured. Regular `tauri dev` does not show developer options.
 
@@ -61,7 +105,7 @@ The main window's dictionary tab supports adding, editing, searching, individual
 
 The dictionary is stored in `dictionary.json` alongside settings, using versioned JSON and atomic writes, and is restored on restart. Browser previews use separate localStorage and do not modify the desktop dictionary.
 
-Each recording starts with a fixed dictionary snapshot. When recording stops, all terms are joined with newlines and uploaded as `hotwords`; the Go server forwards them to ASR as `context`. Dictionary edits take effect on the next recording. The client still returns and pastes `raw_text` unchanged, without forced replacement. Dictionary terms are recognition hints whose effectiveness depends on the ASR model.
+Each recording starts with a fixed dictionary snapshot. When recording stops, all terms are joined with newlines and uploaded as `hotwords`; the Go server forwards them to ASR as `context` (legacy) or `prompt` (audio.cpp). Dictionary edits take effect on the next recording. Dictionary terms are recognition hints whose effectiveness depends on the ASR model, without forced replacement. Optional LLM polishing runs after ASR; the client returns and pastes the same selected output text.
 
 The complete dictionary is limited to **1000 UTF-8 bytes**, including separators, matching the Go API limit. Additions and edits are validated in advance; exceeding the limit produces an explicit error without silent truncation. Corrupt dictionary files produce an error and are preserved.
 
@@ -73,8 +117,8 @@ The complete dictionary is limited to **1000 UTF-8 bytes**, including separators
 
 GitHub Actions runs for pull requests, pushes to `main`, `v*` tag pushes, and manual triggers:
 
-- **Desktop build** uses GitHub-hosted runners to build DMGs for macOS Apple Silicon / Intel and an NSIS EXE installer for Windows x64. Download installers directly from the run's **Artifacts**, without a ZIP wrapper. Developer ID signing, notarization, and Windows code signing are not configured yet.
-- **Server build** runs Go tests and vet, then builds images for `linux/amd64` and `linux/arm64`. Pull requests only build the images; other triggers use `GITHUB_TOKEN` to push to `ghcr.io/import-ai/open-typeless`, without Docker Hub credentials. The `main` branch produces `:main`; for example, the `v0.1.0` tag produces `:0.1.0`, `:0.1`, and `:latest` (prereleases do not update `latest`). Manual runs use the selected branch or version tag.
+- **Desktop build** uses GitHub-hosted runners to build DMGs for macOS Apple Silicon / Intel and an NSIS EXE installer for Windows x64. Download installers directly from the run's **Artifacts**, without a ZIP wrapper. macOS builds use Developer ID signing and notarization with repository secrets. Windows code signing is not configured yet.
+- **Server build** runs Go tests and vet, then builds and pushes images for `linux/amd64` and `linux/arm64` to `ghcr.io/import-ai/open-typeless` using `GITHUB_TOKEN`. Pull requests produce a `:pr-<number>` image; the `main` branch produces `:main`; for example, the `v0.1.0` tag produces `:0.1.0` and `:0.1` (prereleases do not update `latest`). Manual runs use the selected branch or version tag.
 
 Desktop installer names use the version from `tauri-client/tauri.conf.json` and the architecture names `arm64` or `amd64`:
 

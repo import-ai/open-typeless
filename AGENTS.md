@@ -5,10 +5,10 @@
 Open Typeless is a desktop voice input tool: a shortcut starts recording, the completed recording is uploaded in one request, and the recognized text is inserted into the current application through the clipboard and a simulated paste. Recognition is not streamed, and the client does not load an ASR model.
 
 - Desktop: Tauri 2 + Rust, with React + TypeScript + Vite + Tailwind CSS + shadcn/ui on the frontend.
-- Business service: a Go HTTP server that receives multipart audio and forwards it to a separate Python ASR service.
-- Inference currently uses HTTP `/transcribe`, not gRPC. Text polishing is not integrated: `polished_text` equals `raw_text`, and the client pastes `raw_text`.
-- `prd.md` describes product goals, including authentication, gRPC, and polishing that are not implemented yet. Use source code and configuration to determine current behavior; do not describe planned features as implemented.
-- Keep `README.md` focused on end-user installation and usage. Put development, debugging, and build details in `docs/development.md`, server deployment and API details in `docs/deployment.md`, and frontend conventions in `docs/frontend.md`. Local ASR experiments are documented in `deploy/asr/README.md`. Deployment documentation includes historical experiments; the current `deploy/asr/compose.yaml` uses R2T2. Do not infer that Qwen is running from an image name alone, or treat repository configuration as proof of remote runtime state.
+- Business service: a Go HTTP server that forwards multipart audio to a separate ASR service, then optionally polishes its transcript through an OpenAI-compatible LLM.
+- Inference uses HTTP: legacy `/transcribe` or audio.cpp `/v1/audio/transcriptions`, selected by `INFERENCE_PROTOCOL`. `LLM_BASE_URL` enables the approved 3-shot polishing prompt; failures fall back to raw text. The client pastes nonempty `polished_text`, falling back to `raw_text` for older servers.
+- `prd.md` describes product goals, including gRPC that is not implemented yet. Use source code and configuration to determine current behavior; do not describe planned features as implemented.
+- Keep `README.md` focused on end-user installation and usage. Put development, debugging, and build details in `docs/development.md` and frontend conventions in `docs/frontend.md`. Server deployment and API notes are archived locally in `docs/archive/deployment.md`, which is ignored by Git. Local ASR experiments are documented in `deploy/asr/README.md`. Deployment documentation includes historical experiments; the current `deploy/asr/compose.yaml` uses R2T2. Do not infer that Qwen is running from an image name alone, or treat repository configuration as proof of remote runtime state.
 
 ## Code map
 
@@ -38,12 +38,12 @@ The Go module declares Go 1.23; CI and Docker builds currently use Go 1.25. Desk
 Run the business service from the repository root:
 
 ```sh
-INFERENCE_URL=http://localhost:18080 go run ./cmd/server
+BACKEND_API_KEY=local-development-key INFERENCE_URL=http://localhost:18080 go run ./cmd/server
 go test ./...
 go vet ./...
 ```
 
-`HTTP_ADDR` defaults to `:8080`, `INFERENCE_URL` to `http://localhost:18080`, and `MAX_AUDIO_BYTES` to 12 MiB. Use `go run ./cmd/debug-server` instead of the business service to debug uploads; it uses the same default port and saves audio to `/tmp/open-typeless-debug`.
+`BACKEND_API_KEY` is required and protects health and recognition using bearer authentication. `HTTP_ADDR` defaults to `:8080`, `INFERENCE_URL` to `http://localhost:18080`, and `MAX_AUDIO_BYTES` to 12 MiB. Use `go run ./cmd/debug-server` instead of the business service to debug uploads; it uses the same default port and saves audio to `/tmp/open-typeless-debug`.
 
 Run these commands from `tauri-client/`:
 
@@ -69,8 +69,9 @@ npm run tauri build     # Desktop packaging; builds the frontend automatically
 ### API and recognition sessions
 
 - The client stores a complete API base URL, such as `http://127.0.0.1:8080/api/v1`. Append only `/health` or `/recognitions`; do not duplicate `/api/v1`.
+- Backend requests send the configured API key in `Authorization: Bearer ...`; never put it in URLs or logs. The server fails startup without `BACKEND_API_KEY`. Keep the URL/key pair atomic and reject client HTTP redirects.
 - The backend URL is empty by default, and recording is disabled until it is configured. Check health every 30 seconds while idle and before starting a recording.
-- `POST /api/v1/recognitions` accepts `audio` and optional `language` and `hotwords`. Go sends the audio as the raw body to ASR `/transcribe` and maps `hotwords` to the `context` query parameter.
+- `POST /api/v1/recognitions` accepts `audio` and optional `language` and `hotwords`. Legacy ASR uses raw-body `/transcribe` with dictionary `context`; audio.cpp uses multipart `/v1/audio/transcriptions` with dictionary `prompt`. Omit `language=auto` for audio.cpp. Preserve `raw_text` separately from LLM output; incomplete or failed polishing must fall back to raw text.
 - When changing an interface, check the Go response, Rust serialization types, `frontend/src/lib/desktop.ts`, and their callers together.
 - Cancellation must stop the client from waiting and prevent results from cancelled or superseded sessions from reaching the clipboard or being pasted. Preserve session ID checks and temporary recording cleanup; hiding the UI alone is insufficient.
 

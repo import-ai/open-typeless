@@ -3,6 +3,7 @@ mod modifier_shortcut;
 mod settings_file;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use modifier_shortcut::is_modifier;
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
@@ -15,29 +16,33 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-struct Recorder {
-    session: Option<RecordingSession>,
-}
 struct RecordingSession {
     run: Arc<TranscriptionRun>,
     stop: mpsc::Sender<()>,
     done: mpsc::Receiver<Result<PathBuf, String>>,
 }
 struct AppState {
-    recorder: Mutex<Recorder>,
+    recorder: Mutex<Option<RecordingSession>>,
     active: Mutex<Option<Arc<TranscriptionRun>>>,
     next_run: AtomicU64,
-    server_url: Mutex<String>,
+    backend: Mutex<BackendSettings>,
     shortcut: Mutex<String>,
     shortcut_capturing: Mutex<bool>,
     settings_warning: Mutex<Option<String>>,
     dictionary_lock: Mutex<()>,
 }
+#[derive(Clone, Default)]
+struct BackendSettings {
+    server_url: String,
+    api_key: String,
+}
+
 const CANCELLED: &str = "已取消本次识别";
 
 struct TranscriptionRun {
     id: u64,
     hotwords: String,
+    backend: BackendSettings,
     cancelled: AtomicBool,
     notification: tokio::sync::Notify,
     capture_stop: Mutex<Option<mpsc::Sender<()>>>,
@@ -47,6 +52,7 @@ impl TranscriptionRun {
         Self {
             id,
             hotwords: String::new(),
+            backend: BackendSettings::default(),
             cancelled: AtomicBool::new(false),
             notification: tokio::sync::Notify::new(),
             capture_stop: Mutex::new(None),
@@ -83,11 +89,23 @@ struct RecordingFile {
 #[derive(Deserialize)]
 struct Recognition {
     raw_text: String,
+    #[serde(default)]
+    polished_text: Option<String>,
+}
+
+impl Recognition {
+    fn output_text(&self) -> &str {
+        self.polished_text
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(&self.raw_text)
+    }
 }
 #[derive(Serialize)]
 struct Settings {
     shortcut: String,
     server_url: String,
+    api_key: String,
     shortcut_warning: Option<String>,
     developer_options: bool,
     settings_warning: Option<String>,
@@ -150,10 +168,10 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState {
-            recorder: Mutex::new(Recorder { session: None }),
+            recorder: Mutex::new(None),
             active: Mutex::new(None),
             next_run: AtomicU64::new(1),
-            server_url: Mutex::new(String::new()),
+            backend: Mutex::new(BackendSettings::default()),
             shortcut: Mutex::new(default_shortcut_name().into()),
             shortcut_capturing: Mutex::new(false),
             settings_warning: Mutex::new(None),
@@ -185,10 +203,9 @@ fn main() {
             start_recording,
             stop_recording,
             cancel_recording,
-            dismiss_pill,
             debug_pill_preview,
             transcribe_file,
-            set_server_url,
+            set_backend_settings,
             check_server_connection,
             get_settings,
             get_dictionary,
@@ -272,6 +289,13 @@ fn restore_settings(app: &AppHandle) -> Result<(), String> {
             String::new()
         }
     };
+    saved.api_key = match normalize_api_key(&saved.api_key) {
+        Ok(key) => key,
+        Err(error) => {
+            warnings.push(error);
+            String::new()
+        }
+    };
     saved.shortcut = saved.shortcut.trim().to_owned();
     if let Err(error) = bind_named_shortcut(app, &saved.shortcut) {
         warnings.push(format!(
@@ -283,24 +307,24 @@ fn restore_settings(app: &AppHandle) -> Result<(), String> {
     }
     let state = app.state::<AppState>();
     *state.shortcut.lock().map_err(|e| e.to_string())? = saved.shortcut;
-    *state.server_url.lock().map_err(|e| e.to_string())? = saved.server_url;
+    *state.backend.lock().map_err(|e| e.to_string())? = BackendSettings {
+        server_url: saved.server_url,
+        api_key: saved.api_key,
+    };
     *state.settings_warning.lock().map_err(|e| e.to_string())? =
         (!warnings.is_empty()).then(|| warnings.join("；"));
     Ok(())
 }
 
-fn persist_settings(app: &AppHandle, shortcut: &str, server_url: &str) -> Result<(), String> {
+fn persist_settings(app: &AppHandle, shortcut: &str, backend: &BackendSettings) -> Result<(), String> {
     settings_file::save(
         &settings_path(app)?,
         &settings_file::SavedSettings {
             shortcut: shortcut.into(),
-            server_url: server_url.into(),
+            server_url: backend.server_url.clone(),
+            api_key: backend.api_key.clone(),
         },
     )
-}
-
-fn is_modifier(name: &str) -> bool {
-    modifier_shortcut::is_modifier(name)
 }
 
 fn bind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
@@ -322,11 +346,9 @@ fn unbind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
 }
 
 fn parse_shortcut(shortcut_text: &str) -> Result<Shortcut, String> {
-    match shortcut_text.trim().to_ascii_uppercase().as_str() {
-        _ => shortcut_text
-            .parse()
-            .map_err(|e| format!("快捷键格式无效: {e}")),
-    }
+    shortcut_text
+        .parse()
+        .map_err(|e| format!("快捷键格式无效: {e}"))
 }
 
 fn bind_shortcut(app: &AppHandle, shortcut: Shortcut) -> Result<(), String> {
@@ -387,15 +409,6 @@ async fn finish_run(app: &AppHandle, id: u64) {
 
 #[tauri::command]
 async fn start_recording(app: AppHandle) -> Result<(), String> {
-    if app
-        .state::<AppState>()
-        .server_url
-        .lock()
-        .map_err(|e| e.to_string())?
-        .is_empty()
-    {
-        return Err("后端地址未设置".into());
-    }
     let run = {
         let state = app.state::<AppState>();
         let mut active = state.active.lock().map_err(|e| e.to_string())?;
@@ -403,6 +416,7 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
             return Err("已有录音或识别进行中".into());
         }
         let mut run = TranscriptionRun::new(state.next_run.fetch_add(1, Ordering::SeqCst));
+        run.backend = state.backend.lock().map_err(|e| e.to_string())?.clone();
         {
             let _guard = state.dictionary_lock.lock().map_err(|e| e.to_string())?;
             run.hotwords = dictionary::hotwords(&dictionary::load(&dictionary_path(&app)?)?);
@@ -412,6 +426,11 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
         run
     };
     let result = async {
+        tokio::select! {
+            biased;
+            _ = run.cancellation() => return Err(CANCELLED.into()),
+            result = check_backend(&run.backend.server_url, &run.backend.api_key) => result?,
+        }
         // Native shortcut registration must run on the UI thread. Never hold
         // the active-run lock on a worker while waiting for the UI thread.
         let show_app = app.clone();
@@ -620,7 +639,7 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
         .map_err(|e| e.to_string())??;
     let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
     run.check()?;
-    recorder.session = Some(RecordingSession {
+    *recorder = Some(RecordingSession {
         run,
         stop: stop_tx,
         done: done_rx,
@@ -694,11 +713,6 @@ fn hide_pill(app: &AppHandle) {
     let _ = app.emit("pill-hidden", ());
 }
 
-#[tauri::command]
-fn dismiss_pill(app: AppHandle) {
-    hide_pill(&app);
-}
-
 // Exercise the real native window lifecycle without starting a microphone or ASR.
 fn developer_options_enabled() -> bool {
     cfg!(debug_assertions) && std::env::var("OPEN_TYPELESS_DEBUG").as_deref() == Ok("1")
@@ -746,11 +760,10 @@ fn cancel_active(app: &AppHandle) -> Result<(), String> {
         run.cancel();
         let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
         if recorder
-            .session
             .as_ref()
             .is_some_and(|session| session.run.id == run.id)
         {
-            recorder.session.take();
+            recorder.take();
         }
         let _ = std::fs::remove_file(recording_path(run.id));
     }
@@ -764,8 +777,44 @@ fn cancel_recording(app: AppHandle) -> Result<(), String> {
 }
 
 #[cfg(test)]
+fn read_test_request(socket: &mut std::net::TcpStream) -> Vec<u8> {
+    use std::io::Read;
+    socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let mut request = Vec::new();
+    let mut buffer = [0; 4096];
+    loop {
+        let count = socket.read(&mut buffer).unwrap();
+        assert!(count > 0, "incomplete request");
+        request.extend_from_slice(&buffer[..count]);
+        if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+            let length = headers.lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .map(|value| value.parse::<usize>().unwrap())
+                .unwrap_or(0);
+            if request.len() >= end + 4 + length {
+                return request;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::trim_leading_silence;
+
+    #[test]
+    fn recognition_prefers_polished_text_and_supports_older_servers() {
+        for (body, expected) in [
+            (r#"{"raw_text":"raw","polished_text":"Polished."}"#, "Polished."),
+            (r#"{"raw_text":"raw"}"#, "raw"),
+            (r#"{"raw_text":"raw","polished_text":null}"#, "raw"),
+            (r#"{"raw_text":"raw","polished_text":"  "}"#, "raw"),
+        ] {
+            let result: super::Recognition = serde_json::from_str(body).unwrap();
+            assert_eq!(result.output_text(), expected);
+        }
+    }
 
     #[test]
     fn trims_leading_silence_and_keeps_pre_roll() {
@@ -882,12 +931,13 @@ mod tests {
     #[tokio::test]
     async fn upload_uses_dictionary_snapshot_even_after_disk_changes() {
         use super::*;
-        use std::io::{Read, Write};
+        use std::io::Write;
         let directory = tempfile::tempdir().unwrap();
         let dictionary_path = directory.path().join("dictionary.json");
         dictionary::upsert(&dictionary_path, None, "OAuth").unwrap();
         let entries = dictionary::upsert(&dictionary_path, None, "语音").unwrap();
         let mut run = TranscriptionRun::new(1);
+        run.backend.api_key = "upload-test-key".into();
         run.hotwords = dictionary::hotwords(&entries);
         dictionary::upsert(&dictionary_path, Some(&entries[1].id), "changed").unwrap();
         let audio_path = directory.path().join("recording.wav");
@@ -899,30 +949,10 @@ mod tests {
         );
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0; 4096];
-            loop {
-                let count = socket.read(&mut buffer).unwrap();
-                assert!(count > 0, "incomplete request");
-                request.extend_from_slice(&buffer[..count]);
-                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
-                    let length: usize = headers
-                        .lines()
-                        .find_map(|line| line.strip_prefix("content-length: "))
-                        .unwrap()
-                        .parse()
-                        .unwrap();
-                    if request.len() >= end + 4 + length {
-                        break;
-                    }
-                }
-            }
+            let request = read_test_request(&mut socket);
             let request = String::from_utf8(request).unwrap();
             assert!(request.starts_with("POST /api/v1/recognitions "));
+            assert!(request.to_ascii_lowercase().contains("authorization: bearer upload-test-key\r\n"));
             assert!(request.contains("name=\"hotwords\"\r\n\r\n语音\nOAuth\r\n"));
             assert!(!request.contains("changed"));
             assert!(request.contains("test audio"));
@@ -944,7 +974,6 @@ async fn stop_recording(app: AppHandle) -> Result<RecordingFile, String> {
         .recorder
         .lock()
         .map_err(|e| e.to_string())?
-        .session
         .take()
         .ok_or("当前没有录音")?;
     let run = session.run.clone();
@@ -975,7 +1004,7 @@ async fn stop_recording(app: AppHandle) -> Result<RecordingFile, String> {
     }
 }
 
-async fn recognize(url: String, path: &str, hotwords: &str) -> Result<Recognition, String> {
+async fn recognize(url: String, path: &str, hotwords: &str, api_key: &str) -> Result<Recognition, String> {
     let data = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
     let part = reqwest::multipart::Part::bytes(data)
         .file_name("recording.wav")
@@ -985,15 +1014,13 @@ async fn recognize(url: String, path: &str, hotwords: &str) -> Result<Recognitio
         .part("audio", part)
         .text("language", "auto")
         .text("hotwords", hotwords.to_owned());
-    reqwest::Client::new()
-        .post(url)
-        .multipart(form)
+    let request = backend_client()?.post(url).multipart(form);
+    let response = authorize(request, api_key)
         .send()
         .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .json()
+        .map_err(|_| "无法连接后端，请检查地址和服务状态")?;
+    ensure_backend_success(&response)?;
+    response.json()
         .await
         .map_err(|e| e.to_string())
 }
@@ -1007,7 +1034,7 @@ async fn recognize_for_run(
     tokio::select! {
         biased;
         _ = run.cancellation() => Err(CANCELLED.into()),
-        result = recognize(url, path, &run.hotwords) => result,
+        result = recognize(url, path, &run.hotwords, &run.backend.api_key) => result,
     }
 }
 
@@ -1027,16 +1054,10 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<String, 
         .ok_or(CANCELLED)?;
     let result = async {
         run.check()?;
-        let base = app
-            .state::<AppState>()
-            .server_url
-            .lock()
-            .map_err(|e| e.to_string())?
-            .clone();
-        let url = recognition_url(&base)?;
+        let url = recognition_url(&run.backend.server_url)?;
         let result = recognize_for_run(&run, url, &file.path).await?;
         run.check()?;
-        let text = result.raw_text.clone();
+        let text = result.output_text().to_owned();
         let paste_app = app.clone();
         let paste_run = run.clone();
         let (paste_tx, paste_rx) = tokio::sync::oneshot::channel();
@@ -1074,12 +1095,40 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<String, 
         })
         .map_err(|e| e.to_string())?;
         paste_rx.await.map_err(|e| e.to_string())??;
-        Ok(result.raw_text)
+        Ok(result.output_text().to_owned())
     }
     .await;
     let _ = tokio::fs::remove_file(&file.path).await;
     finish_run(&app, run.id).await;
     result
+}
+
+fn normalize_api_key(key: &str) -> Result<String, String> {
+    let key = key.trim();
+    if !key.bytes().all(|byte| (33..=126).contains(&byte)) {
+        return Err("API key 只能包含无空格的可打印 ASCII 字符".into());
+    }
+    Ok(key.into())
+}
+
+fn backend_client() -> Result<reqwest::Client, String> {
+    // Never forward a credential or recording to a redirected endpoint.
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "无法创建后端连接".into())
+}
+
+fn authorize(request: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+    if api_key.is_empty() { request } else { request.bearer_auth(api_key) }
+}
+
+fn ensure_backend_success(response: &reqwest::Response) -> Result<(), String> {
+    match response.status().as_u16() {
+        200..=299 => Ok(()),
+        401 | 403 => Err("API key 无效或未设置，请检查后端设置".into()),
+        status => Err(format!("后端连接失败（HTTP {status}）")),
+    }
 }
 
 fn normalize_server_url(url: &str) -> Result<String, String> {
@@ -1109,23 +1158,17 @@ fn recognition_url(base: &str) -> Result<String, String> {
     Ok(format!("{base}/recognitions"))
 }
 
-async fn check_backend(base: &str) -> Result<(), String> {
+async fn check_backend(base: &str, api_key: &str) -> Result<(), String> {
     let base = normalize_server_url(base)?;
     if base.is_empty() {
         return Err("后端地址未设置".into());
     }
-    let response = reqwest::Client::new()
-        .get(format!("{base}/health"))
+    let response = authorize(backend_client()?.get(format!("{base}/health")), api_key)
         .timeout(Duration::from_secs(3))
         .send()
         .await
         .map_err(|_| "无法连接后端，请检查地址和服务状态")?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "后端连接失败（HTTP {}）",
-            response.status().as_u16()
-        ));
-    }
+    ensure_backend_success(&response)?;
     let body: serde_json::Value = response.json().await.map_err(|_| "后端健康检查响应无效")?;
     if body.get("status").and_then(|status| status.as_str()) != Some("ok") {
         return Err("后端健康检查未通过".into());
@@ -1135,8 +1178,8 @@ async fn check_backend(base: &str) -> Result<(), String> {
 
 #[tauri::command]
 async fn check_server_connection(state: State<'_, AppState>) -> Result<(), String> {
-    let base = state.server_url.lock().map_err(|e| e.to_string())?.clone();
-    check_backend(&base).await
+    let backend = state.backend.lock().map_err(|e| e.to_string())?.clone();
+    check_backend(&backend.server_url, &backend.api_key).await
 }
 
 #[cfg(test)]
@@ -1144,29 +1187,22 @@ mod settings_tests {
     use super::*;
     #[tokio::test]
     async fn readiness_requires_a_successful_health_response() {
-        use std::io::{Read, Write};
-        assert_eq!(check_backend("").await, Err("后端地址未设置".into()));
+        use std::io::Write;
+        assert_eq!(check_backend("", "").await, Err("后端地址未设置".into()));
         for (status, body, healthy) in [
             ("200 OK", r#"{"status":"ok","version":"v0.1.0"}"#, true),
             ("200 OK", r#"{"status":"error"}"#, false),
             ("200 OK", "not-json", false),
             ("503 Unavailable", r#"{"status":"ok"}"#, false),
+            ("401 Unauthorized", r#"{"error":"invalid or missing API key"}"#, false),
         ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}/api/v1/", listener.local_addr().unwrap());
             let server = std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(3)))
-                    .unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0; 1024];
-                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
-                    let count = stream.read(&mut buffer).unwrap();
-                    assert!(count > 0);
-                    request.extend_from_slice(&buffer[..count]);
-                }
+                let request = read_test_request(&mut stream);
                 assert!(request.starts_with(b"GET /api/v1/health HTTP/1.1\r\n"));
+                assert!(String::from_utf8_lossy(&request).to_ascii_lowercase().contains("authorization: bearer test-key\r\n"));
                 write!(
                     stream,
                     "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1174,8 +1210,55 @@ mod settings_tests {
                 )
                 .unwrap();
             });
-            assert_eq!(check_backend(&base).await.is_ok(), healthy);
+            assert_eq!(check_backend(&base, "test-key").await.is_ok(), healthy);
             server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn validates_api_keys_without_exposing_them() {
+        assert_eq!(normalize_api_key("  test-key  ").unwrap(), "test-key");
+        assert_eq!(normalize_api_key("").unwrap(), "");
+        for key in ["secret key", "secret\r\nInjected: true", "密钥"] {
+            let error = normalize_api_key(key).unwrap_err();
+            assert!(!error.contains(key));
+        }
+    }
+
+    #[tokio::test]
+    async fn health_and_upload_reject_redirects_and_report_auth_errors() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let audio = directory.path().join("test.wav");
+        std::fs::write(&audio, b"test audio").unwrap();
+        for upload in [false, true] {
+            for status in ["401 Unauthorized", "403 Forbidden", "307 Temporary Redirect"] {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let base = format!("http://{}/api/v1", listener.local_addr().unwrap());
+                let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                target.set_nonblocking(true).unwrap();
+                let location = format!("http://{}/redirected", target.local_addr().unwrap());
+                let server = std::thread::spawn(move || {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    let request = read_test_request(&mut socket);
+                    assert!(String::from_utf8_lossy(&request).to_ascii_lowercase().contains("authorization: bearer test-key\r\n"));
+                    write!(socket, "HTTP/1.1 {status}\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                });
+                let result = if upload {
+                    recognize(format!("{base}/recognitions"), audio.to_str().unwrap(), "", "test-key").await.map(|_| ())
+                } else {
+                    check_backend(&base, "test-key").await
+                };
+                let error = result.unwrap_err();
+                if status.starts_with("307") {
+                    assert!(error.contains("307"));
+                } else {
+                    assert_eq!(error, "API key 无效或未设置，请检查后端设置");
+                }
+                assert!(!error.contains("test-key"));
+                server.join().unwrap();
+                assert_eq!(target.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+            }
         }
     }
 
@@ -1207,14 +1290,17 @@ mod settings_tests {
 }
 
 #[tauri::command]
-fn set_server_url(app: AppHandle, state: State<'_, AppState>, url: String) -> Result<(), String> {
-    let url = normalize_server_url(&url)?;
-    // Both setters take these locks in this order so concurrent updates cannot
-    // replace the other setting with an older value in the persisted file.
+fn set_backend_settings(app: AppHandle, state: State<'_, AppState>, url: String, api_key: String) -> Result<(), String> {
+    let next = BackendSettings {
+        server_url: normalize_server_url(&url)?,
+        api_key: normalize_api_key(&api_key)?,
+    };
+    // Every settings writer locks shortcut before backend, then persists the
+    // complete URL/key pair before making either value visible to requests.
     let shortcut = state.shortcut.lock().map_err(|e| e.to_string())?;
-    let mut server_url = state.server_url.lock().map_err(|e| e.to_string())?;
-    persist_settings(&app, &shortcut, &url)?;
-    *server_url = url;
+    let mut backend = state.backend.lock().map_err(|e| e.to_string())?;
+    persist_settings(&app, &shortcut, &next)?;
+    *backend = next;
     *state.settings_warning.lock().map_err(|e| e.to_string())? = None;
     Ok(())
 }
@@ -1234,12 +1320,14 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     } else {
         shortcut_warning
     };
+    let backend = state.backend.lock().map_err(|e| e.to_string())?.clone();
     Ok(Settings {
         settings_warning,
         developer_options: developer_options_enabled(),
         shortcut_warning,
         shortcut,
-        server_url: state.server_url.lock().map_err(|e| e.to_string())?.clone(),
+        server_url: backend.server_url,
+        api_key: backend.api_key,
     })
 }
 
@@ -1288,9 +1376,9 @@ fn set_shortcut(
     if *state.shortcut_capturing.lock().map_err(|e| e.to_string())? {
         return Err("请先完成快捷键录入".into());
     }
-    let server_url = state.server_url.lock().map_err(|e| e.to_string())?;
+    let backend = state.backend.lock().map_err(|e| e.to_string())?;
     if *current == shortcut {
-        persist_settings(&app, &shortcut, &server_url)?;
+        persist_settings(&app, &shortcut, &backend)?;
         *state.settings_warning.lock().map_err(|e| e.to_string())? = None;
         return Ok(());
     }
@@ -1299,7 +1387,7 @@ fn set_shortcut(
         let _ = bind_named_shortcut(&app, &current);
         return Err(error);
     }
-    if let Err(error) = persist_settings(&app, &shortcut, &server_url) {
+    if let Err(error) = persist_settings(&app, &shortcut, &backend) {
         let _ = unbind_named_shortcut(&app, &shortcut);
         if let Err(restore_error) = bind_named_shortcut(&app, &current) {
             return Err(format!("{error}；恢复原快捷键失败: {restore_error}"));

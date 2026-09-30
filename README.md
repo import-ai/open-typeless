@@ -6,7 +6,7 @@ Speak, then insert the recognized text into the app you are using. Open Typeless
 - Add frequently used terms to your personal dictionary to help recognition.
 - Move the floating recording indicator or press Esc to cancel.
 
-Recognition happens after you finish speaking. Open Typeless requires a configured recognition service; ask the person running it for a backend URL, or follow the [server setup guide](docs/deployment.md) to host your own. Recordings and dictionary terms are sent to that service for recognition.
+Recognition happens after you finish speaking. Open Typeless requires a configured recognition service; ask the person running it for a backend URL and API key. Recordings and dictionary terms are sent to that service for recognition.
 
 ## Install
 
@@ -24,10 +24,11 @@ Non-release builds include the workflow run ID immediately followed by its attem
 
 1. Open Open Typeless and go to the settings tab.
 2. Enter the backend URL supplied by your service operator, for example `https://example.com/api/v1`. Press Enter or click elsewhere to save it.
-3. On macOS, allow microphone access and grant accessibility permission in **System Settings > Privacy & Security**. Restart the app after granting accessibility permission.
-4. Wait for the app to report that it is ready.
+3. Enter the API key supplied by your service operator. Press Enter or click elsewhere to save it.
+4. On macOS, allow microphone access and grant accessibility permission in **System Settings > Privacy & Security**. Restart the app after granting accessibility permission.
+5. Wait for the app to report that it is ready.
 
-Your backend address and shortcut are saved automatically. Recording is unavailable until the backend is configured and reachable.
+Your backend address, API key, and shortcut are saved automatically. Recording is unavailable until the backend is configured, reachable, and accepts your API key.
 
 ## Start speaking
 
@@ -48,12 +49,11 @@ Dictionary terms help guide recognition, but do not guarantee an exact match. If
 
 ## Need help?
 
-- **The app is not ready:** check the backend address and confirm with your service operator that the service is running.
+- **The app is not ready:** check the backend address and API key, and confirm with your service operator that the service is running.
 - **Recording does not start:** check microphone access. On macOS, also check accessibility permission and restart the app after changing it.
 - **The shortcut does not trigger:** press and release the default modifier key on its own, without another key or mouse click. You can also choose a different shortcut in settings.
 
 ## For developers and service operators
 
 - [Development, debugging, and builds](docs/development.md)
-- [Server deployment and API](docs/deployment.md)
 - [Frontend development](docs/frontend.md)

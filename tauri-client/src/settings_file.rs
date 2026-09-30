@@ -6,6 +6,7 @@ use std::{fs, io::Write, path::Path};
 pub struct SavedSettings {
     pub shortcut: String,
     pub server_url: String,
+    pub api_key: String,
 }
 
 impl Default for SavedSettings {
@@ -13,6 +14,7 @@ impl Default for SavedSettings {
         Self {
             shortcut: crate::default_shortcut_name().into(),
             server_url: String::new(),
+            api_key: String::new(),
         }
     }
 }
@@ -52,6 +54,7 @@ mod tests {
         let mut settings = SavedSettings {
             shortcut: "Control+Shift+K".into(),
             server_url: "http://localhost:8080/api/v1".into(),
+            api_key: "test-key".into(),
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);
@@ -59,6 +62,7 @@ mod tests {
         save(&path, &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);
         settings.server_url.clear();
+        settings.api_key.clear();
         save(&path, &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);
     }
@@ -81,6 +85,7 @@ mod tests {
             load(&path).unwrap().shortcut,
             crate::default_shortcut_name()
         );
+        assert!(load(&path).unwrap().api_key.is_empty());
         assert!(save(&path.join("child.json"), &SavedSettings::default()).is_err());
         assert_eq!(
             load(&path).unwrap().server_url,
