@@ -55,6 +55,16 @@ unauthenticated and is intended only for local testing.
 
 ## Debug recording uploads
 
+On macOS, signed builds enable Hardened Runtime and require both the
+`NSMicrophoneUsageDescription` in `tauri-client/Info.plist` and the
+`com.apple.security.device.audio-input` entitlement in
+`tauri-client/Entitlements.plist`. The Tauri macOS bundle configuration includes
+the entitlements file, and CI checks the signed app before uploading installers.
+To inspect an installed build, run
+`codesign --display --entitlements - "/Applications/Open Typeless.app"`.
+The output must include the audio-input entitlement set to `true`; a usage
+description alone is insufficient. Microphone access still requires user consent.
+
 The optional `cmd/debug-server` tool is kept locally and is not included in a fresh Git checkout. If it is available in your workspace, use it as follows.
 
 To debug client recording, temporarily run `cmd/debug-server` on port 8080. It does not call ASR: it saves uploaded audio to `/tmp/open-typeless-debug` and always returns `raw_text: "foo"`:
@@ -102,7 +112,7 @@ The complete dictionary is limited to **1000 UTF-8 bytes**, including separators
 
 GitHub Actions runs for pull requests, pushes to `main`, `v*` tag pushes, and manual triggers:
 
-- **Desktop build** uses GitHub-hosted runners to build DMGs for macOS Apple Silicon / Intel and an NSIS EXE installer for Windows x64. Download installers directly from the run's **Artifacts**, without a ZIP wrapper. Developer ID signing, notarization, and Windows code signing are not configured yet.
+- **Desktop build** uses GitHub-hosted runners to build DMGs for macOS Apple Silicon / Intel and an NSIS EXE installer for Windows x64. Download installers directly from the run's **Artifacts**, without a ZIP wrapper. macOS builds use Developer ID signing and notarization with repository secrets. Windows code signing is not configured yet.
 - **Server build** runs Go tests and vet, then builds and pushes images for `linux/amd64` and `linux/arm64` to `ghcr.io/import-ai/open-typeless` using `GITHUB_TOKEN`. Pull requests produce a `:pr-<number>` image; the `main` branch produces `:main`; for example, the `v0.1.0` tag produces `:0.1.0` and `:0.1` (prereleases do not update `latest`). Manual runs use the selected branch or version tag.
 
 Desktop installer names use the version from `tauri-client/tauri.conf.json` and the architecture names `arm64` or `amd64`:

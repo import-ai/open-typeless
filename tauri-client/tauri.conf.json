@@ -61,6 +61,7 @@
     "targets": "all",
     "icon": ["icons/generated/icon.png", "icons/generated/icon.icns", "icons/generated/icon.ico"],
     "macOS": {
+      "entitlements": "Entitlements.plist",
       "infoPlist": "Info.plist"
     }
   }
