@@ -33,11 +33,28 @@ environment file or your service manager. With the key exported, run
 `go run ./cmd/server` using the ASR/LLM configuration for your deployment.
 `BACKEND_API_KEY` is separate from `LLM_API_KEY`, which authenticates Go to an
 upstream LLM.
-`LLM_PROMPT_FILE` optionally points to a JSON file containing the polishing
-messages. The file uses the same message array as
-[`cmd/server/polish_messages.json`](../cmd/server/polish_messages.json) and is
-loaded once at startup; when unset, the embedded system prompt and Few-Shot
-messages are used.
+`LLM_PROMPT_FILE` optionally points to a polishing prompt JSON file with
+`system`, `template`, and `samples` fields, matching
+[`cmd/server/polish_messages.json`](../cmd/server/polish_messages.json).
+The file is loaded once at startup; when unset, the embedded prompt is used.
+The previous array of role/content messages must be converted to this format:
+
+```json
+{
+  "system": "Your polishing instructions",
+  "template": "<raw_asr_result>\n${query}\n</raw_asr_result>",
+  "samples": [
+    { "query": "raw example", "answer": "polished example" }
+  ]
+}
+```
+
+The template must contain `${query}`. Every occurrence is replaced literally
+with each sample query and with the live ASR transcript; sample answers and the
+system message are sent unchanged. No escaping or recursive substitution is
+applied to the inserted text. An empty `samples` array disables Few-Shot
+examples. Invalid JSON or a missing placeholder fails startup when polishing
+is enabled.
 
 Both `/api/v1/health` and `/api/v1/recognitions` require
 `Authorization: Bearer <key>`. Missing or incorrect keys return HTTP 401 before

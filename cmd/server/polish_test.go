@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -42,9 +43,12 @@ func TestRecognitionPolishesAfterASR(t *testing.T) {
 			if request.Messages[i].Role != role {
 				t.Errorf("incorrect role at %d", i)
 			}
+			if role == "user" && (!strings.HasPrefix(request.Messages[i].Content, "<raw_asr_result>\n") || !strings.HasSuffix(request.Messages[i].Content, "\n</raw_asr_result>")) {
+				t.Errorf("user message %d did not use the template", i)
+			}
 		}
-		if request.Messages[7].Content != "嗯明天下午三点开会" {
-			t.Errorf("transcript wrapped or changed: %q", request.Messages[7].Content)
+		if request.Messages[7].Content != "<raw_asr_result>\n嗯明天下午三点开会\n</raw_asr_result>" {
+			t.Errorf("unexpected rendered transcript: %q", request.Messages[7].Content)
 		}
 		io.WriteString(w, `{"choices":[{"message":{"content":" 明天下午三点开会。 ","reasoning_content":"never paste this"},"finish_reason":"stop"}]}`)
 	}))
@@ -195,23 +199,25 @@ func TestPolisherConfiguration(t *testing.T) {
 	t.Setenv("LLM_TIMEOUT", "")
 	t.Setenv("LLM_MODEL", "")
 	p, err = polisherFromEnv()
-	if err != nil || p.baseURL != "http://localhost:18081/v1" || p.timeout != 10*time.Second || p.model != "minicpm5-2b-q4" || len(p.messages) != 7 {
+	if err != nil || p.baseURL != "http://localhost:18081/v1" || p.timeout != 10*time.Second || p.model != "minicpm5-2b-q4" || len(p.prompt.Samples) != 3 {
 		t.Fatalf("incorrect defaults: %+v %v", p, err)
 	}
 	promptPath := filepath.Join(t.TempDir(), "prompt.json")
-	if err := os.WriteFile(promptPath, []byte(`[{"role":"system","content":"custom"}]`), 0o600); err != nil {
+	if err := os.WriteFile(promptPath, []byte(`{"system":"custom","template":"<input>${query}</input>","samples":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("LLM_PROMPT_FILE", promptPath)
 	p, err = polisherFromEnv()
-	if err != nil || len(p.messages) != 1 || p.messages[0].Content != "custom" {
+	if err != nil || len(p.prompt.Samples) != 0 || p.prompt.System != "custom" || p.prompt.Template != "<input>${query}</input>" {
 		t.Fatalf("custom prompt was not loaded: %+v %v", p, err)
 	}
-	if err := os.WriteFile(promptPath, []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := polisherFromEnv(); err == nil {
-		t.Fatal("invalid custom prompt accepted")
+	for _, invalid := range []string{"{", "null", "{}", `[{"role":"system","content":"legacy"}]`, `{"template":"no placeholder"}`, `{"template":"${query}","samples":[{"query":42}]}`} {
+		if err := os.WriteFile(promptPath, []byte(invalid), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := polisherFromEnv(); err == nil {
+			t.Fatalf("invalid custom prompt accepted: %s", invalid)
+		}
 	}
 	t.Setenv("LLM_TIMEOUT", "-1s")
 	if _, err := polisherFromEnv(); err == nil {
@@ -222,6 +228,46 @@ func TestPolisherConfiguration(t *testing.T) {
 		t.Setenv("LLM_BASE_URL", base)
 		if _, err := polisherFromEnv(); err == nil {
 			t.Fatal("invalid base URL accepted")
+		}
+	}
+}
+
+func TestPolisherCustomTemplate(t *testing.T) {
+	want := []chatMessage{
+		{Role: "system", Content: "Instructions ${query}"},
+		{Role: "user", Content: "[sample]\nsample"},
+		{Role: "assistant", Content: "Answer ${query}"},
+		{Role: "user", Content: "[raw ${query}\n<&>]\nraw ${query}\n<&>"},
+	}
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request polishRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		if !reflect.DeepEqual(request.Messages, want) {
+			t.Errorf("unexpected messages: %#v", request.Messages)
+		}
+		io.WriteString(w, `{"choices":[{"message":{"content":"polished"},"finish_reason":"stop"}]}`)
+	}))
+	defer llm.Close()
+	path := filepath.Join(t.TempDir(), "prompt.json")
+	if err := os.WriteFile(path, []byte(`{"system":"Instructions ${query}","template":"[${query}]\n${query}","samples":[{"query":"sample","answer":"Answer ${query}"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLM_BASE_URL", llm.URL)
+	t.Setenv("LLM_TIMEOUT", "1s")
+	t.Setenv("LLM_PROMPT_FILE", path)
+	p, err := polisherFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The startup snapshot survives file changes, and requests never accumulate messages.
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if text, err := p.polish(context.Background(), "raw ${query}\n<&>"); err != nil || text != "polished" {
+			t.Fatalf("polishing failed: %q %v", text, err)
 		}
 	}
 }

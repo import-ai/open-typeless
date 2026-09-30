@@ -16,11 +16,31 @@ import (
 )
 
 //go:embed polish_messages.json
-var polishMessagesJSON []byte
+var polishPromptJSON []byte
 
 type chatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+type polishPrompt struct {
+	System   string `json:"system"`
+	Template string `json:"template"`
+	Samples  []struct {
+		Query  string `json:"query"`
+		Answer string `json:"answer"`
+	} `json:"samples"`
+}
+
+func (p *polishPrompt) messages(raw string) []chatMessage {
+	messages := []chatMessage{{Role: "system", Content: p.System}}
+	for _, sample := range p.Samples {
+		messages = append(messages,
+			chatMessage{Role: "user", Content: strings.ReplaceAll(p.Template, "${query}", sample.Query)},
+			chatMessage{Role: "assistant", Content: sample.Answer},
+		)
+	}
+	return append(messages, chatMessage{Role: "user", Content: strings.ReplaceAll(p.Template, "${query}", raw)})
 }
 
 type polishRequest struct {
@@ -34,12 +54,12 @@ type polishRequest struct {
 }
 
 type polisher struct {
-	baseURL  string
-	model    string
-	apiKey   string
-	timeout  time.Duration
-	messages []chatMessage
-	client   *http.Client
+	baseURL string
+	model   string
+	apiKey  string
+	timeout time.Duration
+	prompt  *polishPrompt
+	client  *http.Client
 }
 
 func polisherFromEnv() (*polisher, error) {
@@ -55,19 +75,19 @@ func polisherFromEnv() (*polisher, error) {
 	if err != nil || timeout <= 0 {
 		return nil, errors.New("LLM_TIMEOUT must be a positive duration, such as 10s")
 	}
-	messages, err := loadPolishMessages()
+	prompt, err := loadPolishPrompt()
 	if err != nil {
 		return nil, err
 	}
 	return &polisher{
 		baseURL: base, model: env("LLM_MODEL", "minicpm5-2b-q4"),
-		apiKey: os.Getenv("LLM_API_KEY"), timeout: timeout, messages: messages,
+		apiKey: os.Getenv("LLM_API_KEY"), timeout: timeout, prompt: prompt,
 		client: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}, nil
 }
 
-func loadPolishMessages() ([]chatMessage, error) {
-	data := polishMessagesJSON
+func loadPolishPrompt() (*polishPrompt, error) {
+	data := polishPromptJSON
 	path := strings.TrimSpace(os.Getenv("LLM_PROMPT_FILE"))
 	if path != "" {
 		var err error
@@ -76,27 +96,28 @@ func loadPolishMessages() ([]chatMessage, error) {
 			return nil, fmt.Errorf("failed to read LLM_PROMPT_FILE: %w", err)
 		}
 	}
-	var messages []chatMessage
-	if err := json.Unmarshal(data, &messages); err != nil {
+	var prompt polishPrompt
+	if err := json.Unmarshal(data, &prompt); err != nil {
 		return nil, fmt.Errorf("invalid polishing prompt: %w", err)
 	}
-	return messages, nil
+	if !strings.Contains(prompt.Template, "${query}") {
+		return nil, errors.New("polishing template must contain ${query}")
+	}
+	return &prompt, nil
 }
 
 func (p *polisher) polish(parent context.Context, raw string) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, p.timeout)
 	defer cancel()
-	messages := p.messages
-	if messages == nil {
+	prompt := p.prompt
+	if prompt == nil {
 		var err error
-		messages, err = loadPolishMessages()
+		prompt, err = loadPolishPrompt()
 		if err != nil {
 			return "", err
 		}
 	}
-	messages = append([]chatMessage(nil), messages...)
-	messages = append(messages, chatMessage{Role: "user", Content: raw})
-	body, err := json.Marshal(polishRequest{Model: p.model, Messages: messages, MaxTokens: 512})
+	body, err := json.Marshal(polishRequest{Model: p.model, Messages: prompt.messages(raw), MaxTokens: 512})
 	if err != nil {
 		return "", errors.New("failed to encode polishing request")
 	}
