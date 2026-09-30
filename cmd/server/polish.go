@@ -34,11 +34,12 @@ type polishRequest struct {
 }
 
 type polisher struct {
-	baseURL string
-	model   string
-	apiKey  string
-	timeout time.Duration
-	client  *http.Client
+	baseURL  string
+	model    string
+	apiKey   string
+	timeout  time.Duration
+	messages []chatMessage
+	client   *http.Client
 }
 
 func polisherFromEnv() (*polisher, error) {
@@ -54,20 +55,46 @@ func polisherFromEnv() (*polisher, error) {
 	if err != nil || timeout <= 0 {
 		return nil, errors.New("LLM_TIMEOUT must be a positive duration, such as 10s")
 	}
+	messages, err := loadPolishMessages()
+	if err != nil {
+		return nil, err
+	}
 	return &polisher{
 		baseURL: base, model: env("LLM_MODEL", "minicpm5-2b-q4"),
-		apiKey: os.Getenv("LLM_API_KEY"), timeout: timeout,
+		apiKey: os.Getenv("LLM_API_KEY"), timeout: timeout, messages: messages,
 		client: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}, nil
+}
+
+func loadPolishMessages() ([]chatMessage, error) {
+	data := polishMessagesJSON
+	path := strings.TrimSpace(os.Getenv("LLM_PROMPT_FILE"))
+	if path != "" {
+		var err error
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read LLM_PROMPT_FILE: %w", err)
+		}
+	}
+	var messages []chatMessage
+	if err := json.Unmarshal(data, &messages); err != nil {
+		return nil, fmt.Errorf("invalid polishing prompt: %w", err)
+	}
+	return messages, nil
 }
 
 func (p *polisher) polish(parent context.Context, raw string) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, p.timeout)
 	defer cancel()
-	var messages []chatMessage
-	if err := json.Unmarshal(polishMessagesJSON, &messages); err != nil {
-		return "", errors.New("invalid embedded polishing prompt")
+	messages := p.messages
+	if messages == nil {
+		var err error
+		messages, err = loadPolishMessages()
+		if err != nil {
+			return "", err
+		}
 	}
+	messages = append([]chatMessage(nil), messages...)
 	messages = append(messages, chatMessage{Role: "user", Content: raw})
 	body, err := json.Marshal(polishRequest{Model: p.model, Messages: messages, MaxTokens: 512})
 	if err != nil {

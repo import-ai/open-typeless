@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -184,6 +186,7 @@ func TestRecognitionCancellationStopsPolishing(t *testing.T) {
 
 func TestPolisherConfiguration(t *testing.T) {
 	t.Setenv("LLM_BASE_URL", "")
+	t.Setenv("LLM_PROMPT_FILE", "")
 	p, err := polisherFromEnv()
 	if p != nil || err != nil {
 		t.Fatal("polishing should be disabled")
@@ -192,8 +195,23 @@ func TestPolisherConfiguration(t *testing.T) {
 	t.Setenv("LLM_TIMEOUT", "")
 	t.Setenv("LLM_MODEL", "")
 	p, err = polisherFromEnv()
-	if err != nil || p.baseURL != "http://localhost:18081/v1" || p.timeout != 10*time.Second || p.model != "minicpm5-2b-q4" {
+	if err != nil || p.baseURL != "http://localhost:18081/v1" || p.timeout != 10*time.Second || p.model != "minicpm5-2b-q4" || len(p.messages) != 7 {
 		t.Fatalf("incorrect defaults: %+v %v", p, err)
+	}
+	promptPath := filepath.Join(t.TempDir(), "prompt.json")
+	if err := os.WriteFile(promptPath, []byte(`[{"role":"system","content":"custom"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLM_PROMPT_FILE", promptPath)
+	p, err = polisherFromEnv()
+	if err != nil || len(p.messages) != 1 || p.messages[0].Content != "custom" {
+		t.Fatalf("custom prompt was not loaded: %+v %v", p, err)
+	}
+	if err := os.WriteFile(promptPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := polisherFromEnv(); err == nil {
+		t.Fatal("invalid custom prompt accepted")
 	}
 	t.Setenv("LLM_TIMEOUT", "-1s")
 	if _, err := polisherFromEnv(); err == nil {
