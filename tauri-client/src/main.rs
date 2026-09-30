@@ -363,7 +363,8 @@ fn bind_shortcut(app: &AppHandle, shortcut: Shortcut) -> Result<(), String> {
                         .get_webview_window("pill")
                         .is_some_and(|w| w.is_visible().unwrap_or(false))
                 {
-                    let _ = cancel_active(&handle);
+                    // Defer cancellation: the plugin holds its shortcut registry lock here.
+                    let _ = handle.emit_to("main", "cancel-requested", ());
                     return;
                 }
                 let _ = handle.emit_to("main", "toggle-requested", ());
@@ -678,7 +679,8 @@ fn show_pill(app: &AppHandle) -> Result<(), String> {
         app.global_shortcut()
             .on_shortcut(escape, move |_, _, event| {
                 if event.state == ShortcutState::Pressed {
-                    let _ = cancel_active(&handle);
+                    // Defer cancellation so hiding the pill can safely unregister Esc.
+                    let _ = handle.emit_to("main", "cancel-requested", ());
                 }
             })
             .map_err(|e| e.to_string())?;
