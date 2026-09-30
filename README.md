@@ -5,6 +5,7 @@ Speak, then insert the recognized text into the app you are using. Open Typeless
 - Start and finish recording with a keyboard shortcut.
 - Add frequently used terms to your personal dictionary to help recognition.
 - Move the floating recording indicator or press Esc to cancel.
+- Review local recording history and see your dictation activity and estimated time saved.
 
 Recognition happens after you finish speaking. Open Typeless requires a configured recognition service; ask the person running it for a backend URL and API key. Recordings and dictionary terms are sent to that service for recognition.
 
@@ -46,6 +47,14 @@ To change the shortcut, click the shortcut field in settings, press your preferr
 Use the dictionary tab to add terms you say often, such as product names or technical vocabulary. You can edit, search, and delete entries individually or in bulk. Changes apply to your next recording and are saved for future sessions.
 
 Dictionary terms help guide recognition, but do not guarantee an exact match. If the dictionary reaches its capacity, the app will ask you to shorten or remove entries.
+
+## History and insights
+
+The history tab keeps successful, nonempty transcriptions and their recordings on your computer. Expand a row to read the full result, or use its menu to locate the recording in Finder / File Explorer, copy the raw or polished text, or delete the entry. Deletion also removes its recording and cannot be undone through the app. If no polished result was returned, the row displays the raw text and copying a polished result is unavailable.
+
+The voice input page shows lifetime character count, audio duration, dictation speed, estimated time saved, and activity for the current month plus the previous five months. Characters are counted from the raw transcript: Chinese characters, letters, and digits count; spaces, punctuation, and emoji do not. Audio duration measures the uploaded WAV after leading silence is trimmed. Time saved assumes typing at **30 characters per minute** and can be negative. Cancelled, failed, and empty recognitions do not count. A paste failure does not remove a completed transcription.
+
+Deleting history does not reduce the lifetime statistics or calendar activity. History, recordings, and daily totals stay in `~/.open-typeless/` on macOS or `%USERPROFILE%\.open-typeless\` on Windows, with no history synchronization. Audio is still sent to your configured recognition service as described above. Collection starts when you first use a version with this feature; earlier usage cannot be recovered.
 
 ## Need help?
 

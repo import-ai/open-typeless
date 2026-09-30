@@ -1,4 +1,5 @@
 mod dictionary;
+mod history;
 mod modifier_shortcut;
 mod settings_file;
 
@@ -41,6 +42,9 @@ const CANCELLED: &str = "已取消本次识别";
 
 struct TranscriptionRun {
     id: u64,
+    stamp: history::Stamp,
+    transcribing: AtomicBool,
+    finalizing: AtomicBool,
     hotwords: String,
     backend: BackendSettings,
     cancelled: AtomicBool,
@@ -51,6 +55,9 @@ impl TranscriptionRun {
     fn new(id: u64) -> Self {
         Self {
             id,
+            stamp: history::Stamp::new(id),
+            transcribing: AtomicBool::new(false),
+            finalizing: AtomicBool::new(false),
             hotwords: String::new(),
             backend: BackendSettings::default(),
             cancelled: AtomicBool::new(false),
@@ -58,7 +65,16 @@ impl TranscriptionRun {
             capture_stop: Mutex::new(None),
         }
     }
-    fn cancel(&self) {
+    fn begin_transcription(&self) -> Result<(), String> {
+        self.check()?;
+        if self.transcribing.swap(true, Ordering::SeqCst) {
+            return Err("本次录音已在处理中".into());
+        }
+        Ok(())
+    }
+    fn cancel(&self) -> bool {
+        // Callers serialize cancellation and result acceptance with the active-run lock.
+        if self.finalizing.load(Ordering::SeqCst) { return false; }
         self.cancelled.store(true, Ordering::SeqCst);
         self.notification.notify_one();
         if let Ok(stop) = self.capture_stop.lock() {
@@ -66,6 +82,7 @@ impl TranscriptionRun {
                 let _ = stop.send(());
             }
         }
+        true
     }
     fn check(&self) -> Result<(), String> {
         if self.cancelled.load(Ordering::SeqCst) {
@@ -92,6 +109,14 @@ struct Recognition {
     #[serde(default)]
     polished_text: Option<String>,
 }
+
+#[derive(Serialize)]
+struct TranscriptionOutcome {
+    text: String,
+    warnings: Vec<String>,
+}
+
+type HistoryState = Mutex<Result<history::Store, String>>;
 
 impl Recognition {
     fn output_text(&self) -> &str {
@@ -183,6 +208,7 @@ fn main() {
                 eprintln!("{error}");
             }
             restore_settings(app.handle())?;
+            app.manage(HistoryState::new(config_directory(app.handle()).and_then(|path| history::Store::open(&path))));
             position_pill(app.handle())?;
             Ok(())
         })
@@ -211,6 +237,11 @@ fn main() {
             get_dictionary,
             save_dictionary_entry,
             delete_dictionary_entries,
+            get_history_page,
+            get_insights,
+            delete_history_entry,
+            copy_history_text,
+            reveal_history_recording,
             set_shortcut,
             set_shortcut_capture
         ])
@@ -241,6 +272,57 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn dictionary_path(app: &AppHandle) -> Result<PathBuf, String> {
     config_directory(app).map(|directory| directory.join("dictionary.json"))
+}
+
+async fn with_history<T: Send + 'static>(app: AppHandle, action: impl FnOnce(&mut history::Store) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // ponytail: one local connection; use separate readers only if queries contend with writes.
+        let state = app.state::<HistoryState>();
+        let mut store = state.lock().map_err(|e| e.to_string())?;
+        action(store.as_mut().map_err(|e| format!("本地历史不可用: {e}"))?)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_history_page(app: AppHandle, cursor: Option<history::Cursor>) -> Result<history::Page, String> {
+    with_history(app, move |store| store.page(cursor)).await
+}
+
+#[tauri::command]
+async fn get_insights(app: AppHandle) -> Result<history::Insights, String> {
+    with_history(app, |store| store.insights()).await
+}
+
+#[tauri::command]
+async fn delete_history_entry(app: AppHandle, id: String) -> Result<(), String> {
+    let result = with_history(app.clone(), move |store| store.delete(&id)).await;
+    // A failed file removal still changes the row to a retryable deletion.
+    let _ = app.emit("history-changed", ());
+    result
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum HistoryText { Raw, Polished }
+
+#[tauri::command]
+async fn copy_history_text(app: AppHandle, id: String, kind: HistoryText) -> Result<(), String> {
+    with_history(app, move |store| {
+        let entry = store.entry(&id)?.ok_or("历史记录不存在")?;
+        if entry.deleting { return Err("记录正在删除，请重试删除操作".into()); }
+        let text = match kind {
+            HistoryText::Raw => entry.raw_text,
+            HistoryText::Polished => entry.polished_text.filter(|text| !text.trim().is_empty()).ok_or("没有润色结果")?,
+        };
+        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)).map_err(|e| e.to_string())
+    }).await
+}
+
+#[tauri::command]
+async fn reveal_history_recording(app: AppHandle, id: String) -> Result<(), String> {
+    with_history(app, move |store| {
+        tauri_plugin_opener::reveal_item_in_dir(store.recording(&id)?).map_err(|e| e.to_string())
+    }).await
 }
 
 #[tauri::command]
@@ -758,8 +840,10 @@ fn debug_pill_preview(app: AppHandle, mode: String) -> Result<String, String> {
 fn cancel_active(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let mut active = state.active.lock().map_err(|e| e.to_string())?;
+    if active.as_ref().is_some_and(|run| !run.cancel()) {
+        return Ok(());
+    }
     if let Some(run) = active.take() {
-        run.cancel();
         let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
         if recorder
             .as_ref()
@@ -883,6 +967,24 @@ mod tests {
             with_current_run(&active, &fresh, || Ok("new result")),
             Ok("new result")
         );
+    }
+
+    #[test]
+    fn transcription_is_single_use_and_accepted_results_finish_without_cancellation() {
+        use super::*;
+        let run = Arc::new(TranscriptionRun::new(1));
+        let active = Mutex::new(Some(run.clone()));
+        run.begin_transcription().unwrap();
+        assert!(run.begin_transcription().is_err());
+        with_current_run(&active, &run, || {
+            run.finalizing.store(true, Ordering::SeqCst);
+            Ok(())
+        }).unwrap();
+        assert!(!run.cancel());
+        assert!(with_current_run(&active, &run, || Ok(())).is_ok());
+        let cancelled = TranscriptionRun::new(2);
+        assert!(cancelled.cancel());
+        assert!(cancelled.begin_transcription().is_err());
     }
 
     #[tokio::test]
@@ -1041,7 +1143,7 @@ async fn recognize_for_run(
 }
 
 #[tauri::command]
-async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<String, String> {
+async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<TranscriptionOutcome, String> {
     if PathBuf::from(&file.path) != recording_path(file.run_id) {
         return Err("无效的录音文件".into());
     }
@@ -1054,12 +1156,40 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<String, 
         .filter(|run| run.id == file.run_id)
         .cloned()
         .ok_or(CANCELLED)?;
+    run.begin_transcription()?;
     let result = async {
         run.check()?;
         let url = recognition_url(&run.backend.server_url)?;
-        let result = recognize_for_run(&run, url, &file.path).await?;
+        let recognition = recognize_for_run(&run, url, &file.path).await?;
         run.check()?;
-        let text = result.output_text().to_owned();
+        if recognition.raw_text.trim().is_empty() {
+            return Ok(TranscriptionOutcome { text: String::new(), warnings: Vec::new() });
+        }
+        // Accepting a result and cancellation share the active-run lock. Once
+        // accepted, hide the cancel UI and finish archiving/pasting this run.
+        let accept_app = app.clone();
+        let accept_run = run.clone();
+        let (accept_tx, accept_rx) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let outcome = with_current_run(&accept_app.state::<AppState>().active, &accept_run, || {
+                accept_run.finalizing.store(true, Ordering::SeqCst);
+                hide_pill(&accept_app);
+                Ok(())
+            });
+            let _ = accept_tx.send(outcome);
+        }).map_err(|e| e.to_string())?;
+        accept_rx.await.map_err(|e| e.to_string())??;
+        let text = recognition.output_text().to_owned();
+        let stamp = run.stamp.clone();
+        let path = PathBuf::from(&file.path);
+        let mut warnings = Vec::new();
+        match with_history(app.clone(), move |store| {
+            store.save(&stamp, &path, &recognition.raw_text, recognition.polished_text.as_deref())
+        }).await {
+            Ok(()) => { let _ = app.emit("history-changed", ()); }
+            Err(error) => warnings.push(format!("识别成功，但本地历史保存失败: {error}")),
+        };
+        let output = text.clone();
         let paste_app = app.clone();
         let paste_run = run.clone();
         let (paste_tx, paste_rx) = tokio::sync::oneshot::channel();
@@ -1096,8 +1226,10 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<String, 
             let _ = paste_tx.send(outcome);
         })
         .map_err(|e| e.to_string())?;
-        paste_rx.await.map_err(|e| e.to_string())??;
-        Ok(result.output_text().to_owned())
+        if let Err(error) = paste_rx.await.map_err(|e| e.to_string())? {
+            warnings.push(format!("自动粘贴失败: {error}"));
+        }
+        Ok(TranscriptionOutcome { text: output, warnings })
     }
     .await;
     let _ = tokio::fs::remove_file(&file.path).await;

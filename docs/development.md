@@ -33,11 +33,28 @@ environment file or your service manager. With the key exported, run
 `go run ./cmd/server` using the ASR/LLM configuration for your deployment.
 `BACKEND_API_KEY` is separate from `LLM_API_KEY`, which authenticates Go to an
 upstream LLM.
-`LLM_PROMPT_FILE` optionally points to a JSON file containing the polishing
-messages. The file uses the same message array as
-[`cmd/server/polish_messages.json`](../cmd/server/polish_messages.json) and is
-loaded once at startup; when unset, the embedded system prompt and Few-Shot
-messages are used.
+`LLM_PROMPT_FILE` optionally points to a polishing prompt JSON file with
+`system`, `template`, and `samples` fields, matching
+[`cmd/server/polish_messages.json`](../cmd/server/polish_messages.json).
+The file is loaded once at startup; when unset, the embedded prompt is used.
+The previous array of role/content messages must be converted to this format:
+
+```json
+{
+  "system": "Your polishing instructions",
+  "template": "<raw_asr_result>\n${query}\n</raw_asr_result>",
+  "samples": [
+    { "query": "raw example", "answer": "polished example" }
+  ]
+}
+```
+
+The template must contain `${query}`. Every occurrence is replaced literally
+with each sample query and with the live ASR transcript; sample answers and the
+system message are sent unchanged. No escaping or recursive substitution is
+applied to the inserted text. An empty `samples` array disables Few-Shot
+examples. Invalid JSON or a missing placeholder fails startup when polishing
+is enabled.
 
 Both `/api/v1/health` and `/api/v1/recognitions` require
 `Authorization: Bearer <key>`. Missing or incorrect keys return HTTP 401 before
@@ -108,6 +125,20 @@ The dictionary is stored in `dictionary.json` alongside settings, using versione
 Each recording starts with a fixed dictionary snapshot. When recording stops, all terms are joined with newlines and uploaded as `hotwords`; the Go server forwards them to ASR as `context` (legacy) or `prompt` (audio.cpp). Dictionary edits take effect on the next recording. Dictionary terms are recognition hints whose effectiveness depends on the ASR model, without forced replacement. Optional LLM polishing runs after ASR; the client returns and pastes the same selected output text.
 
 The complete dictionary is limited to **1000 UTF-8 bytes**, including separators, matching the Go API limit. Additions and edits are validated in advance; exceeding the limit produces an explicit error without silent truncation. Corrupt dictionary files produce an error and are preserved.
+
+## Local history and insights
+
+Rust owns `history.sqlite3` and `recordings/<id>.wav` in the same user directory as settings. `history.rs` uses bundled SQLite through rusqlite, one serialized connection, and `PRAGMA user_version = 1`. Database work and file operations run on blocking workers. Database initialization failures are exposed by history/insights commands without replacing the existing database or preventing dictation.
+
+Each accepted, nonempty recognition archives the uploaded WAV and inserts the raw text, optional polished text, recording timestamp, original local date/UTC offset, Unicode alphanumeric count, and WAV duration. The history insert and `daily_usage` increment share a transaction. Daily totals have no foreign key to deletable history; insights sum them independently. The history cursor orders by `(local_date, started_at_ms, id)` descending and fetches 50 entries per page.
+
+Cancellation and acceptance are serialized with the active session. Cancellation before acceptance prevents archiving, accounting, and pasting. Acceptance closes the pill's cancellation UI and keeps the session occupied until storage and paste finish. Duplicate transcription calls are rejected. Storage failures are reported alongside the recognized text and do not prevent a paste attempt; paste failures preserve saved history. `transcribe_file` returns `{text, warnings}`. Committed changes emit `history-changed`; views also refresh on focus and local date changes.
+
+Audio is staged inside the recording directory and published before the database transaction. A failed transaction removes that new audio. A process crash between publication and commit can leave an unreferenced file; startup deliberately does not delete arbitrary unreferenced files. Deletion first persists a `deleting` flag, removes the WAV (missing files count as removed), then deletes the row. Failed deletions remain retryable and are retried at startup, without touching daily totals. These operations use normal filesystem deletion, not forensic erasure or removal from system backups.
+
+The calendar shows the current month and five preceding months, using local calendar arithmetic. Daily intensity thresholds are 0, 1–99, 100–499, 500–999, and 1000+ characters. Browser history previews use disposable in-memory samples; they never access desktop data. Menus use the existing Radix primitives and deletion uses the shared dialog. File reveal is exposed only through a Rust command accepting a record ID; the frontend is not granted a general file opener permission.
+
+Validate with `npm run build`, `node --experimental-strip-types --test tests/*.test.mjs`, and `cargo test --locked` from `tauri-client/`. Native checks must cover the 420px window, recording/recognition cancellation, clipboard/paste failure, file reveal, deletion/restart, and pill focus/transparency on macOS and Windows.
 
 ## Application icons
 
