@@ -1,6 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { loadPreviewDictionary, savePreviewWord, deletePreviewWords, type DictionaryEntry } from './dictionary'
+import { deletePreviewEntry, previewHistory, previewInsights, previewText, type HistoryCursor, type HistoryPage, type Insights, type TranscriptionOutcome } from './history'
 
 export type MicState = 'disconnected' | 'unready' | 'ready'
 export type PillState = MicState | 'processing'
@@ -16,6 +17,14 @@ export const windowLabel = desktop
 export interface RecordingFile { path: string; run_id: number }
 export interface Settings { shortcut: string; server_url: string; api_key: string; shortcut_warning: string | null; settings_warning: string | null; developer_options: boolean }
 export const commands = {
+  history: async (cursor?: HistoryCursor) => desktop ? invoke<HistoryPage>('get_history_page', { cursor: cursor ?? null }) : previewHistory(),
+  insights: async () => desktop ? invoke<Insights>('get_insights') : previewInsights(),
+  deleteHistory: async (id: string) => desktop ? invoke<void>('delete_history_entry', { id }) : deletePreviewEntry(id),
+  copyHistoryText: async (id: string, kind: 'raw' | 'polished') => desktop ? invoke<void>('copy_history_text', { id, kind }) : navigator.clipboard.writeText(previewText(id, kind)),
+  revealRecording: async (id: string) => {
+    if (desktop) return invoke<void>('reveal_history_recording', { id })
+    throw new Error('界面预览没有录音文件，请在桌面应用中查看')
+  },
   dictionary: async () => desktop ? invoke<DictionaryEntry[]>('get_dictionary') : loadPreviewDictionary(),
   saveWord: async (text: string, id?: string) => desktop ? invoke<DictionaryEntry[]>('save_dictionary_entry', { text, id: id ?? null }) : savePreviewWord(id, text),
   deleteWords: async (ids: string[]) => desktop ? invoke<DictionaryEntry[]>('delete_dictionary_entries', { ids }) : deletePreviewWords(ids),
@@ -31,7 +40,7 @@ export const commands = {
   start: () => invoke<void>('start_recording'),
   stop: () => invoke<RecordingFile>('stop_recording'),
   cancel: () => invoke<void>('cancel_recording'),
-  transcribe: (file: RecordingFile) => invoke<string>('transcribe_file', { file }),
+  transcribe: (file: RecordingFile) => invoke<TranscriptionOutcome>('transcribe_file', { file }),
   captureShortcut: (capturing: boolean) => invoke<void>('set_shortcut_capture', { capturing }),
   shortcut: (shortcut: string) => invoke<void>('set_shortcut', { shortcut }),
   previewPill: (mode: PillState | 'hidden') => invoke<string>('debug_pill_preview', { mode }),

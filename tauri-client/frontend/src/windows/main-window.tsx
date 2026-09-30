@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Tabs } from 'radix-ui'
 import { DictionaryPanel } from '@/components/dictionary-panel'
+import { HistoryPanel } from '@/components/history-panel'
+import { InsightsPanel } from '@/components/insights-panel'
 import { Mic, Square } from 'lucide-react'
 import { DeveloperOptions } from '@/components/developer-options'
 import { ShortcutKeys } from '@/components/shortcut-keys'
@@ -41,6 +43,8 @@ export function MainWindow() {
   const capturingShortcutRef = useRef(false)
   const dictionaryInputActive = useRef(false)
   const onDictionaryInputActiveChange = useCallback((active: boolean) => { dictionaryInputActive.current = active }, [])
+  const historyInputActive = useRef(false)
+  const onHistoryInputActiveChange = useCallback((active: boolean) => { historyInputActive.current = active }, [])
   const [saving, setSaving] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const changePhase = (next: Phase) => { phaseRef.current = next; setPhase(next) }
@@ -107,8 +111,8 @@ export function MainWindow() {
     changePhase('processing')
     setStatus('正在上传和识别…')
     try {
-      const text = await commands.transcribe(file)
-      if (epoch.current === current) setStatus(text || '未识别到文字')
+      const result = await commands.transcribe(file)
+      if (epoch.current === current) setStatus([result.text || '未识别到文字', ...result.warnings].join('\n'))
     } catch (error) {
       if (epoch.current === current) setStatus(String(error))
     } finally { if (epoch.current === current) reset() }
@@ -141,7 +145,7 @@ export function MainWindow() {
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [])
   useTauriEvent('toggle-requested', () => {
-    if (!capturingShortcutRef.current && !dictionaryInputActive.current && !backendInputActive.current) void (phaseRef.current === 'recording' ? stop() : start())
+    if (!capturingShortcutRef.current && !dictionaryInputActive.current && !historyInputActive.current && !backendInputActive.current) void (phaseRef.current === 'recording' ? stop() : start())
   })
   useTauriEvent('stop-requested', () => { void stop() })
   useTauriEvent('cancel-requested', () => { void cancel() })
@@ -192,9 +196,10 @@ export function MainWindow() {
       <p className="mt-1 text-sm text-muted-foreground">按快捷键开始录音，再按一次完成输入。</p>
     </header>
     <Tabs.Root defaultValue="voice" className="space-y-5">
-    <Tabs.List aria-label="主导航" className="grid grid-cols-3 rounded-lg bg-muted p-1">
+    <Tabs.List aria-label="主导航" className="grid grid-cols-4 rounded-lg bg-muted p-1">
       <Tabs.Trigger value="voice" className="rounded-md px-3 py-1.5 text-sm text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm">语音输入</Tabs.Trigger>
       <Tabs.Trigger value="dictionary" className="rounded-md px-3 py-1.5 text-sm text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm">词典</Tabs.Trigger>
+      <Tabs.Trigger value="history" className="rounded-md px-2 py-1.5 text-sm text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm">历史记录</Tabs.Trigger>
       <Tabs.Trigger value="settings" className="rounded-md px-3 py-1.5 text-sm text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm">设置</Tabs.Trigger>
     </Tabs.List>
     <Tabs.Content value="voice" className="space-y-5 outline-none">
@@ -217,11 +222,13 @@ export function MainWindow() {
             麦克风{micLabels[mic]}
           </span>
         </div>
-        <p role="status" className="min-h-5 break-words text-sm text-muted-foreground">{phase === 'idle' ? idleStatus : status}</p>
+        <p role="status" className="max-h-24 min-h-5 overflow-y-auto whitespace-pre-wrap break-words text-sm text-muted-foreground">{phase === 'idle' ? idleStatus : status}</p>
       </CardContent>
     </Card>
+    <InsightsPanel />
     </Tabs.Content>
     <Tabs.Content value="dictionary" className="outline-none"><DictionaryPanel onInputActiveChange={onDictionaryInputActiveChange} /></Tabs.Content>
+    <Tabs.Content value="history" className="outline-none"><HistoryPanel onInputActiveChange={onHistoryInputActiveChange} /></Tabs.Content>
     <Tabs.Content value="settings" className="space-y-5 outline-none">
     <section className="space-y-5" aria-labelledby="settings-title">
       <h2 id="settings-title" className="text-base font-semibold">设置</h2>

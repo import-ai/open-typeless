@@ -109,6 +109,20 @@ Each recording starts with a fixed dictionary snapshot. When recording stops, al
 
 The complete dictionary is limited to **1000 UTF-8 bytes**, including separators, matching the Go API limit. Additions and edits are validated in advance; exceeding the limit produces an explicit error without silent truncation. Corrupt dictionary files produce an error and are preserved.
 
+## Local history and insights
+
+Rust owns `history.sqlite3` and `recordings/<id>.wav` in the same user directory as settings. `history.rs` uses bundled SQLite through rusqlite, one serialized connection, and `PRAGMA user_version = 1`. Database work and file operations run on blocking workers. Database initialization failures are exposed by history/insights commands without replacing the existing database or preventing dictation.
+
+Each accepted, nonempty recognition archives the uploaded WAV and inserts the raw text, optional polished text, recording timestamp, original local date/UTC offset, Unicode alphanumeric count, and WAV duration. The history insert and `daily_usage` increment share a transaction. Daily totals have no foreign key to deletable history; insights sum them independently. The history cursor orders by `(local_date, started_at_ms, id)` descending and fetches 50 entries per page.
+
+Cancellation and acceptance are serialized with the active session. Cancellation before acceptance prevents archiving, accounting, and pasting. Acceptance closes the pill's cancellation UI and keeps the session occupied until storage and paste finish. Duplicate transcription calls are rejected. Storage failures are reported alongside the recognized text and do not prevent a paste attempt; paste failures preserve saved history. `transcribe_file` returns `{text, history_id, warnings}`. Committed changes emit `history-changed`; views also refresh on focus and local date changes.
+
+Audio is staged inside the recording directory and published before the database transaction. A failed transaction removes that new audio. A process crash between publication and commit can leave an unreferenced file; startup deliberately does not delete arbitrary unreferenced files. Deletion first persists a `deleting` flag, removes the WAV (missing files count as removed), then deletes the row. Failed deletions remain retryable and are retried at startup, without touching daily totals. These operations use normal filesystem deletion, not forensic erasure or removal from system backups.
+
+The calendar shows the current month and five preceding months, using local calendar arithmetic. Daily intensity thresholds are 0, 1–99, 100–499, 500–999, and 1000+ characters. Browser history previews use disposable in-memory samples; they never access desktop data. Menus use the existing Radix primitives and deletion uses the shared dialog. File reveal is exposed only through a Rust command accepting a record ID; the frontend is not granted a general file opener permission.
+
+Validate with `npm run build`, `node --experimental-strip-types --test tests/*.test.mjs`, and `cargo test --locked` from `tauri-client/`. Native checks must cover the 420px window, recording/recognition cancellation, clipboard/paste failure, file reveal, deletion/restart, and pill focus/transparency on macOS and Windows.
+
 ## Application icons
 
 `tauri-client/icons/icon.svg` is the single source for the application icon, with separate background, waveform, and cat-head groups. `tauri dev`, `tauri build`, and GitHub desktop builds generate PNG, macOS ICNS, and Windows ICO files in the ignored `tauri-client/icons/generated/` directory. All packaging configuration uses these generated files. Run `npm run generate:icons` from `tauri-client/` to generate them separately; also do this before running Cargo builds or tests directly. Old PNGs, design variants, and historical exports are kept in the local `docs/archive/icons/` directory (not tracked by Git) and do not participate in builds.
