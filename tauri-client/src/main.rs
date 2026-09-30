@@ -205,7 +205,6 @@ fn main() {
             start_recording,
             stop_recording,
             cancel_recording,
-            dismiss_pill,
             debug_pill_preview,
             transcribe_file,
             set_backend_settings,
@@ -353,11 +352,9 @@ fn unbind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
 }
 
 fn parse_shortcut(shortcut_text: &str) -> Result<Shortcut, String> {
-    match shortcut_text.trim().to_ascii_uppercase().as_str() {
-        _ => shortcut_text
-            .parse()
-            .map_err(|e| format!("快捷键格式无效: {e}")),
-    }
+    shortcut_text
+        .parse()
+        .map_err(|e| format!("快捷键格式无效: {e}"))
 }
 
 fn bind_shortcut(app: &AppHandle, shortcut: Shortcut) -> Result<(), String> {
@@ -720,11 +717,6 @@ fn hide_pill(app: &AppHandle) {
     }
     let _ = app.emit("mic-state", "disconnected");
     let _ = app.emit("pill-hidden", ());
-}
-
-#[tauri::command]
-fn dismiss_pill(app: AppHandle) {
-    hide_pill(&app);
 }
 
 // Exercise the real native window lifecycle without starting a microphone or ASR.

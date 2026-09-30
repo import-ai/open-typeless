@@ -58,8 +58,6 @@ jobs:
           workspaces: tauri-client
           key: ${{ matrix.target }}
       - run: npm ci
-      - name: Generate platform icons from SVG
-        run: npm run generate:icons
       - name: Prepare Apple notarization key
         if: startsWith(matrix.target, 'aarch64-apple-') || startsWith(matrix.target, 'x86_64-apple-')
         shell: bash

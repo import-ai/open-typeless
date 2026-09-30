@@ -34,6 +34,5 @@ export const commands = {
   transcribe: (file: RecordingFile) => invoke<string>('transcribe_file', { file }),
   captureShortcut: (capturing: boolean) => invoke<void>('set_shortcut_capture', { capturing }),
   shortcut: (shortcut: string) => invoke<void>('set_shortcut', { shortcut }),
-  dismissPill: () => invoke<void>('dismiss_pill'),
   previewPill: (mode: PillState | 'hidden') => invoke<string>('debug_pill_preview', { mode }),
 }
