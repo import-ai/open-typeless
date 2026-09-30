@@ -103,7 +103,7 @@ The complete dictionary is limited to **1000 UTF-8 bytes**, including separators
 GitHub Actions runs for pull requests, pushes to `main`, `v*` tag pushes, and manual triggers:
 
 - **Desktop build** uses GitHub-hosted runners to build DMGs for macOS Apple Silicon / Intel and an NSIS EXE installer for Windows x64. Download installers directly from the run's **Artifacts**, without a ZIP wrapper. Developer ID signing, notarization, and Windows code signing are not configured yet.
-- **Server build** runs Go tests and vet, then builds images for `linux/amd64` and `linux/arm64`. Pull requests only build the images; other triggers use `GITHUB_TOKEN` to push to `ghcr.io/import-ai/open-typeless`, without Docker Hub credentials. The `main` branch produces `:main`; for example, the `v0.1.0` tag produces `:0.1.0`, `:0.1`, and `:latest` (prereleases do not update `latest`). Manual runs use the selected branch or version tag.
+- **Server build** runs Go tests and vet, then builds and pushes images for `linux/amd64` and `linux/arm64` to `ghcr.io/import-ai/open-typeless` using `GITHUB_TOKEN`. Pull requests produce a `:pr-<number>` image; the `main` branch produces `:main`; for example, the `v0.1.0` tag produces `:0.1.0` and `:0.1` (prereleases do not update `latest`). Manual runs use the selected branch or version tag.
 
 Desktop installer names use the version from `tauri-client/tauri.conf.json` and the architecture names `arm64` or `amd64`:
 
