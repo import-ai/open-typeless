@@ -418,16 +418,6 @@ async fn finish_run(app: &AppHandle, id: u64) {
 
 #[tauri::command]
 async fn start_recording(app: AppHandle) -> Result<(), String> {
-    if app
-        .state::<AppState>()
-        .backend
-        .lock()
-        .map_err(|e| e.to_string())?
-        .server_url
-        .is_empty()
-    {
-        return Err("后端地址未设置".into());
-    }
     let run = {
         let state = app.state::<AppState>();
         let mut active = state.active.lock().map_err(|e| e.to_string())?;
@@ -802,6 +792,29 @@ fn cancel_recording(app: AppHandle) -> Result<(), String> {
 }
 
 #[cfg(test)]
+fn read_test_request(socket: &mut std::net::TcpStream) -> Vec<u8> {
+    use std::io::Read;
+    socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let mut request = Vec::new();
+    let mut buffer = [0; 4096];
+    loop {
+        let count = socket.read(&mut buffer).unwrap();
+        assert!(count > 0, "incomplete request");
+        request.extend_from_slice(&buffer[..count]);
+        if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+            let length = headers.lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .map(|value| value.parse::<usize>().unwrap())
+                .unwrap_or(0);
+            if request.len() >= end + 4 + length {
+                return request;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::trim_leading_silence;
 
@@ -933,7 +946,7 @@ mod tests {
     #[tokio::test]
     async fn upload_uses_dictionary_snapshot_even_after_disk_changes() {
         use super::*;
-        use std::io::{Read, Write};
+        use std::io::Write;
         let directory = tempfile::tempdir().unwrap();
         let dictionary_path = directory.path().join("dictionary.json");
         dictionary::upsert(&dictionary_path, None, "OAuth").unwrap();
@@ -951,28 +964,7 @@ mod tests {
         );
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0; 4096];
-            loop {
-                let count = socket.read(&mut buffer).unwrap();
-                assert!(count > 0, "incomplete request");
-                request.extend_from_slice(&buffer[..count]);
-                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
-                    let length: usize = headers
-                        .lines()
-                        .find_map(|line| line.strip_prefix("content-length: "))
-                        .unwrap()
-                        .parse()
-                        .unwrap();
-                    if request.len() >= end + 4 + length {
-                        break;
-                    }
-                }
-            }
+            let request = read_test_request(&mut socket);
             let request = String::from_utf8(request).unwrap();
             assert!(request.starts_with("POST /api/v1/recognitions "));
             assert!(request.to_ascii_lowercase().contains("authorization: bearer upload-test-key\r\n"));
@@ -1211,7 +1203,7 @@ mod settings_tests {
     use super::*;
     #[tokio::test]
     async fn readiness_requires_a_successful_health_response() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         assert_eq!(check_backend("", "").await, Err("后端地址未设置".into()));
         for (status, body, healthy) in [
             ("200 OK", r#"{"status":"ok","version":"v0.1.0"}"#, true),
@@ -1224,16 +1216,7 @@ mod settings_tests {
             let base = format!("http://{}/api/v1/", listener.local_addr().unwrap());
             let server = std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(3)))
-                    .unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0; 1024];
-                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
-                    let count = stream.read(&mut buffer).unwrap();
-                    assert!(count > 0);
-                    request.extend_from_slice(&buffer[..count]);
-                }
+                let request = read_test_request(&mut stream);
                 assert!(request.starts_with(b"GET /api/v1/health HTTP/1.1\r\n"));
                 assert!(String::from_utf8_lossy(&request).to_ascii_lowercase().contains("authorization: bearer test-key\r\n"));
                 write!(
@@ -1260,7 +1243,7 @@ mod settings_tests {
 
     #[tokio::test]
     async fn health_and_upload_reject_redirects_and_report_auth_errors() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         let directory = tempfile::tempdir().unwrap();
         let audio = directory.path().join("test.wav");
         std::fs::write(&audio, b"test audio").unwrap();
@@ -1273,19 +1256,7 @@ mod settings_tests {
                 let location = format!("http://{}/redirected", target.local_addr().unwrap());
                 let server = std::thread::spawn(move || {
                     let (mut socket, _) = listener.accept().unwrap();
-                    socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-                    let mut request = Vec::new();
-                    let mut buffer = [0; 4096];
-                    loop {
-                        let count = socket.read(&mut buffer).unwrap();
-                        assert!(count > 0);
-                        request.extend_from_slice(&buffer[..count]);
-                        if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-                            let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
-                            let length = headers.lines().find_map(|line| line.strip_prefix("content-length: ")).map(|s| s.parse::<usize>().unwrap()).unwrap_or(0);
-                            if request.len() >= end + 4 + length { break; }
-                        }
-                    }
+                    let request = read_test_request(&mut socket);
                     assert!(String::from_utf8_lossy(&request).to_ascii_lowercase().contains("authorization: bearer test-key\r\n"));
                     write!(socket, "HTTP/1.1 {status}\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                 });

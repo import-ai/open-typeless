@@ -25,9 +25,7 @@ export function MainWindow() {
   const [status, setStatus] = useState(desktop ? '就绪' : '界面预览 · 请在桌面应用中录音')
   const [shortcut, setShortcut] = useState(desktop ? '' : previewShortcut)
   const [serverUrl, setServerUrl] = useState('')
-  const savedServerUrl = useRef('')
   const [apiKey, setApiKey] = useState('')
-  const savedApiKey = useRef('')
   const [configuredApiKey, setConfiguredApiKey] = useState('')
   const savingBackend = useRef(false)
   const backendInputActive = useRef(false)
@@ -55,9 +53,7 @@ export function MainWindow() {
       setShortcut(settings.shortcut)
       setServerUrl(settings.server_url)
       setApiKey(settings.api_key)
-      savedApiKey.current = settings.api_key
       setConfiguredApiKey(settings.api_key)
-      savedServerUrl.current = settings.server_url
       setConfiguredServerUrl(settings.server_url)
       setDeveloperOptions(settings.developer_options)
       setLoaded(true)
@@ -90,7 +86,7 @@ export function MainWindow() {
 
   async function start() {
     if (savingBackend.current || busy.current || phaseRef.current !== 'idle') return
-    if (!savedServerUrl.current) { setStatus('后端地址未设置'); return }
+    if (!configuredServerUrl) { setStatus('后端地址未设置'); return }
     const current = ++epoch.current
     busy.current = true
     changePhase('starting')
@@ -169,7 +165,7 @@ export function MainWindow() {
   async function saveBackend() {
     const value = serverUrl.trim().replace(/\/+$/, '')
     const key = apiKey.trim()
-    if (savingBackend.current || (value === savedServerUrl.current && key === savedApiKey.current)) return
+    if (savingBackend.current || (value === configuredServerUrl && key === configuredApiKey)) return
     savingBackend.current = true
     setSavingServer(true)
     try {
@@ -179,8 +175,6 @@ export function MainWindow() {
       }
       if (/[^\x21-\x7e]/.test(key)) throw new Error('API key 只能包含无空格的可打印 ASCII 字符')
       if (desktop) await commands.backendSettings(value, key)
-      savedServerUrl.current = value
-      savedApiKey.current = key
       setApiKey(key)
       setConfiguredApiKey(key)
       setConnection('checking')
