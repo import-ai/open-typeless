@@ -113,7 +113,6 @@ struct Recognition {
 #[derive(Serialize)]
 struct TranscriptionOutcome {
     text: String,
-    history_id: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -1164,7 +1163,7 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<Transcri
         let recognition = recognize_for_run(&run, url, &file.path).await?;
         run.check()?;
         if recognition.raw_text.trim().is_empty() {
-            return Ok(TranscriptionOutcome { text: String::new(), history_id: None, warnings: Vec::new() });
+            return Ok(TranscriptionOutcome { text: String::new(), warnings: Vec::new() });
         }
         // Accepting a result and cancellation share the active-run lock. Once
         // accepted, hide the cancel UI and finish archiving/pasting this run.
@@ -1184,12 +1183,11 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<Transcri
         let stamp = run.stamp.clone();
         let path = PathBuf::from(&file.path);
         let mut warnings = Vec::new();
-        let history_id = match with_history(app.clone(), move |store| {
-            store.save(&stamp, &path, &recognition.raw_text, recognition.polished_text.as_deref())?;
-            Ok(stamp.id)
+        match with_history(app.clone(), move |store| {
+            store.save(&stamp, &path, &recognition.raw_text, recognition.polished_text.as_deref())
         }).await {
-            Ok(id) => { let _ = app.emit("history-changed", ()); Some(id) }
-            Err(error) => { warnings.push(format!("识别成功，但本地历史保存失败: {error}")); None }
+            Ok(()) => { let _ = app.emit("history-changed", ()); }
+            Err(error) => warnings.push(format!("识别成功，但本地历史保存失败: {error}")),
         };
         let output = text.clone();
         let paste_app = app.clone();
@@ -1231,7 +1229,7 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<Transcri
         if let Err(error) = paste_rx.await.map_err(|e| e.to_string())? {
             warnings.push(format!("自动粘贴失败: {error}"));
         }
-        Ok(TranscriptionOutcome { text: output, history_id, warnings })
+        Ok(TranscriptionOutcome { text: output, warnings })
     }
     .await;
     let _ = tokio::fs::remove_file(&file.path).await;

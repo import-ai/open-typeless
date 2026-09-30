@@ -13,7 +13,7 @@ export interface HistoryCursor { local_date: string; started_at_ms: number; id: 
 export interface HistoryPage { entries: HistoryEntry[]; next_cursor: HistoryCursor | null }
 export interface DailyUsage { local_date: string; character_count: number; audio_duration_ms: number; recognition_count: number }
 export interface Insights { character_count: number; audio_duration_ms: number; days: DailyUsage[] }
-export interface TranscriptionOutcome { text: string; history_id: string | null; warnings: string[] }
+export interface TranscriptionOutcome { text: string; warnings: string[] }
 
 export function localDate(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
