@@ -124,7 +124,6 @@ func (s *server) recognize(w http.ResponseWriter, r *http.Request) {
 		RawText         string  `json:"raw_text"`
 		Language        string  `json:"language"`
 		AudioDurationMS int     `json:"audio_duration_ms"`
-		ProcessingMS    int     `json:"processing_ms"`
 		Text            *string `json:"text"`
 		Timing          struct {
 			AudioDurationMS float64 `json:"audio_duration_ms"`

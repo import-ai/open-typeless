@@ -20,7 +20,6 @@ export function PillWindow() {
   useTauriEvent<number>('mic-level', setLevel)
   useTauriEvent('recording-starting', () => { setPreview(false); setState('unready'); setLevel(0) })
   useTauriEvent('recording-processing', () => setState('processing'))
-  useTauriEvent('recording-stopped', () => setState('processing'))
   useTauriEvent('recording-cancelled', () => setState('disconnected'))
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

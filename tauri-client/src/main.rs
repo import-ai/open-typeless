@@ -3,6 +3,7 @@ mod modifier_shortcut;
 mod settings_file;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use modifier_shortcut::is_modifier;
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
@@ -15,16 +16,13 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-struct Recorder {
-    session: Option<RecordingSession>,
-}
 struct RecordingSession {
     run: Arc<TranscriptionRun>,
     stop: mpsc::Sender<()>,
     done: mpsc::Receiver<Result<PathBuf, String>>,
 }
 struct AppState {
-    recorder: Mutex<Recorder>,
+    recorder: Mutex<Option<RecordingSession>>,
     active: Mutex<Option<Arc<TranscriptionRun>>>,
     next_run: AtomicU64,
     backend: Mutex<BackendSettings>,
@@ -170,7 +168,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState {
-            recorder: Mutex::new(Recorder { session: None }),
+            recorder: Mutex::new(None),
             active: Mutex::new(None),
             next_run: AtomicU64::new(1),
             backend: Mutex::new(BackendSettings::default()),
@@ -327,10 +325,6 @@ fn persist_settings(app: &AppHandle, shortcut: &str, backend: &BackendSettings) 
             api_key: backend.api_key.clone(),
         },
     )
-}
-
-fn is_modifier(name: &str) -> bool {
-    modifier_shortcut::is_modifier(name)
 }
 
 fn bind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
@@ -645,7 +639,7 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
         .map_err(|e| e.to_string())??;
     let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
     run.check()?;
-    recorder.session = Some(RecordingSession {
+    *recorder = Some(RecordingSession {
         run,
         stop: stop_tx,
         done: done_rx,
@@ -766,11 +760,10 @@ fn cancel_active(app: &AppHandle) -> Result<(), String> {
         run.cancel();
         let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
         if recorder
-            .session
             .as_ref()
             .is_some_and(|session| session.run.id == run.id)
         {
-            recorder.session.take();
+            recorder.take();
         }
         let _ = std::fs::remove_file(recording_path(run.id));
     }
@@ -981,7 +974,6 @@ async fn stop_recording(app: AppHandle) -> Result<RecordingFile, String> {
         .recorder
         .lock()
         .map_err(|e| e.to_string())?
-        .session
         .take()
         .ok_or("当前没有录音")?;
     let run = session.run.clone();
