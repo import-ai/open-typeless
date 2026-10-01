@@ -40,6 +40,8 @@ Your backend address, API key, and shortcut are saved automatically. Recording i
 
 Press **Esc** while recording or waiting for recognition to cancel. You can drag the floating recording indicator to a convenient position; it stays there until you quit the app.
 
+If recording or recognition fails, the floating indicator turns red and shows an error. Hover over it for details, then press **Esc** or click its close button to dismiss it. Check the backend settings if it reports a missing or unavailable backend.
+
 To change the shortcut, click the shortcut field in settings, press your preferred key or key combination, then release it to save. Click elsewhere to cancel shortcut capture.
 
 ## Personal dictionary

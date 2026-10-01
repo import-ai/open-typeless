@@ -51,7 +51,7 @@ Run these commands from `tauri-client/`:
 npm ci
 npm run tauri dev       # Native desktop development; starts Vite automatically
 npm run dev             # Browser preview only
-npm run tauri:debug     # Native preview of four pill states and developer options
+npm run tauri:debug     # Native preview of five pill states and developer options
 npm run typecheck
 npm run build           # TypeScript checks and frontend production build
 node --experimental-strip-types --test tests/*.test.mjs

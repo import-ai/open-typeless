@@ -90,7 +90,6 @@ export function MainWindow() {
 
   async function start() {
     if (savingBackend.current || busy.current || phaseRef.current !== 'idle') return
-    if (!configuredServerUrl) { setStatus('后端地址未设置'); return }
     const current = ++epoch.current
     busy.current = true
     changePhase('starting')

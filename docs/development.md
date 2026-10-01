@@ -15,7 +15,7 @@ npm run tauri dev
 `tauri dev` starts Vite automatically, and frontend edits update through HMR. Other development commands:
 
 ```sh
-npm run tauri:debug  # Persistent native previews of all four pill states
+npm run tauri:debug  # Persistent native previews of all five pill states
 npm run dev         # Browser preview only; does not use the microphone
 npm run typecheck   # Strict TypeScript checks
 npm run build       # Type checks and dist/ generation
@@ -100,7 +100,9 @@ ls -lh /tmp/open-typeless-debug
 
 Open `http://localhost:5173/?view=pill-debug` in a browser to work on the pill in isolation.
 
-When started with `npm run tauri:debug`, the main window's developer options can show or hide the native pill and switch among disconnected, unready, ready, and processing states. Selecting a state immediately displays its appearance. This preview does not activate the microphone or call ASR, and is unavailable during recording or recognition. For native visual regression checks, test `processing -> disconnected` and `processing -> ready -> disconnected`; the capsule's rounded ends and bottom edge must remain intact. The capsule and recognition circle use separate elements with fixed dimensions and switch opacity, avoiding residual macOS clipping caused by resizing a shared element.
+When started with `npm run tauri:debug`, the main window's developer options can show or hide the native pill and switch among disconnected, unready, ready, processing, and error states. Selecting a state immediately displays its appearance. This preview does not activate the microphone or call ASR, and is unavailable during recording or recognition. For native visual regression checks, test `processing -> disconnected`, `processing -> ready -> disconnected`, and `processing -> error -> ready`; the capsule's rounded ends and bottom edge must remain intact. The capsule and recognition circle use separate elements with fixed dimensions and switch opacity, avoiding residual macOS clipping caused by resizing a shared element.
+
+Failed recording attempts (including a missing backend URL or failed health check), recording failures, recognition failures, and history/paste warnings display a red error pill. It shows a short label, with the full message available on hover and in the main window. The error remains until dismissed with its close button or Esc, or replaced by another recording attempt or preview. Background idle health checks do not show the pill. Session checks prevent cancelled or superseded requests from displaying stale errors.
 
 The pill initially appears centered horizontally on the main screen, with its bottom edge 128 logical pixels above the screen bottom. The waveform, right-side waiting indicator, and recognition circle can all be dragged and display a grab cursor. The dragged position persists until the application exits. On macOS, the pill accepts the first mouse click without taking keyboard focus. Esc cancels the current recording or recognition while the pill is visible and is released when the pill is hidden. Cancellation stops the client request and prevents results from old sessions from being pasted.
 

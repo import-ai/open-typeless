@@ -116,6 +116,18 @@ struct TranscriptionOutcome {
     warnings: Vec<String>,
 }
 
+#[derive(Clone, Serialize)]
+struct PillError {
+    label: &'static str,
+    message: String,
+}
+
+impl PillError {
+    fn new(label: &'static str, message: impl Into<String>) -> Self {
+        Self { label, message: message.into() }
+    }
+}
+
 type HistoryState = Mutex<Result<history::Store, String>>;
 
 impl Recognition {
@@ -471,17 +483,40 @@ fn recording_path(id: u64) -> PathBuf {
     std::env::temp_dir().join(format!("open-typeless-{}-{}.wav", std::process::id(), id))
 }
 
-async fn finish_run(app: &AppHandle, id: u64) {
+fn finish_current_run(
+    active: &mut Option<Arc<TranscriptionRun>>,
+    id: u64,
+    error: Option<PillError>,
+    update_pill: impl FnOnce(Option<PillError>),
+) {
+    if active.as_ref().is_none_or(|run| run.id != id) {
+        return;
+    }
+    let run = active.take().unwrap();
+    let error = error.filter(|_| run.check().is_ok());
+    if error.is_some() {
+        run.cancel();
+    }
+    update_pill(error);
+}
+
+async fn finish_run(app: &AppHandle, id: u64, error: Option<PillError>) {
     let finish_app = app.clone();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     if app
         .run_on_main_thread(move || {
             let state = finish_app.state::<AppState>();
             let mut active = state.active.lock().unwrap();
-            if active.as_ref().is_some_and(|run| run.id == id) {
-                *active = None;
-                hide_pill(&finish_app);
-            }
+            finish_current_run(&mut active, id, error, |error| {
+                if let Some(error) = error {
+                    let _ = finish_app.emit_to("pill", "recording-error", error);
+                    if let Err(error) = show_pill(&finish_app) {
+                        eprintln!("Unable to show pill error: {error}");
+                    }
+                } else {
+                    hide_pill(&finish_app);
+                }
+            });
             let _ = done_tx.send(());
         })
         .is_ok()
@@ -492,7 +527,7 @@ async fn finish_run(app: &AppHandle, id: u64) {
 
 #[tauri::command]
 async fn start_recording(app: AppHandle) -> Result<(), String> {
-    let run = {
+    let (run, setup) = {
         let state = app.state::<AppState>();
         let mut active = state.active.lock().map_err(|e| e.to_string())?;
         if active.is_some() {
@@ -500,20 +535,25 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
         }
         let mut run = TranscriptionRun::new(state.next_run.fetch_add(1, Ordering::SeqCst));
         run.backend = state.backend.lock().map_err(|e| e.to_string())?.clone();
-        {
+        let setup = (|| {
             let _guard = state.dictionary_lock.lock().map_err(|e| e.to_string())?;
             run.hotwords = dictionary::hotwords(&dictionary::load(&dictionary_path(&app)?)?);
-        }
+            Ok::<_, String>(())
+        })();
         let run = Arc::new(run);
         *active = Some(run.clone());
-        run
+        (run, setup)
     };
+    let mut error_label = "录音失败";
     let result = async {
+        setup?;
+        error_label = if run.backend.server_url.is_empty() { "后端未设置" } else { "后端不可用" };
         tokio::select! {
             biased;
             _ = run.cancellation() => return Err(CANCELLED.into()),
             result = check_backend(&run.backend.server_url, &run.backend.api_key) => result?,
         }
+        error_label = "录音失败";
         // Native shortcut registration must run on the UI thread. Never hold
         // the active-run lock on a worker while waiting for the UI thread.
         let show_app = app.clone();
@@ -543,9 +583,8 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?
     }
     .await;
-    if result.is_err() {
-        run.cancel();
-        finish_run(&app, run.id).await;
+    if let Err(error) = &result {
+        finish_run(&app, run.id, Some(PillError::new(error_label, error))).await;
     }
     result
 }
@@ -818,7 +857,7 @@ fn debug_pill_preview(app: AppHandle, mode: String) -> Result<String, String> {
     }
     let window = app.get_webview_window("pill").ok_or("找不到 pill 窗口")?;
     match mode.as_str() {
-        "disconnected" | "unready" | "ready" | "processing" => {
+        "disconnected" | "unready" | "ready" | "processing" | "error" => {
             app.emit_to("pill", "pill-preview", &mode)
                 .map_err(|e| e.to_string())?;
             show_pill(&app)?;
@@ -888,6 +927,32 @@ fn read_test_request(socket: &mut std::net::TcpStream) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::trim_leading_silence;
+
+    #[test]
+    fn failed_runs_show_errors_but_cancelled_or_superseded_runs_do_not() {
+        use super::*;
+        let error = || Some(PillError::new("后端不可用", "Connection failed"));
+        let run = Arc::new(TranscriptionRun::new(1));
+        let mut active = Some(run.clone());
+        let mut displayed = None;
+        finish_current_run(&mut active, 1, error(), |error| displayed = error);
+        assert_eq!(displayed.unwrap().message, "Connection failed");
+        assert!(active.is_none());
+        assert!(run.check().is_err());
+
+        let cancelled = Arc::new(TranscriptionRun::new(2));
+        cancelled.cancel();
+        active = Some(cancelled);
+        finish_current_run(&mut active, 2, error(), |error| assert!(error.is_none()));
+        assert!(active.is_none());
+        finish_current_run(&mut active, 2, error(), |_| panic!("dismissed pill reopened"));
+
+        active = Some(Arc::new(TranscriptionRun::new(3)));
+        finish_current_run(&mut active, 2, error(), |_| panic!("new session overwritten"));
+        assert_eq!(active.as_ref().unwrap().id, 3);
+        finish_current_run(&mut active, 3, None, |error| assert!(error.is_none()));
+        assert!(active.is_none());
+    }
 
     #[test]
     fn recognition_prefers_polished_text_and_supports_older_servers() {
@@ -1092,7 +1157,8 @@ async fn stop_recording(app: AppHandle) -> Result<RecordingFile, String> {
             .map_err(|e| e.to_string())?
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())
+    .flatten();
     match result {
         Ok(path) if run.check().is_ok() => Ok(RecordingFile {
             path: path.to_string_lossy().to_string(),
@@ -1102,8 +1168,9 @@ async fn stop_recording(app: AppHandle) -> Result<RecordingFile, String> {
             if let Ok(path) = &other {
                 let _ = std::fs::remove_file(path);
             }
-            finish_run(&app, run.id).await;
-            Err(other.err().unwrap_or_else(|| CANCELLED.into()))
+            let error = other.err().unwrap_or_else(|| CANCELLED.into());
+            finish_run(&app, run.id, Some(PillError::new("录音失败", &error))).await;
+            Err(error)
         }
     }
 }
@@ -1233,7 +1300,14 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<Transcri
     }
     .await;
     let _ = tokio::fs::remove_file(&file.path).await;
-    finish_run(&app, run.id).await;
+    let error = match &result {
+        Err(error) => Some(PillError::new("识别失败", error)),
+        Ok(outcome) if !outcome.warnings.is_empty() => {
+            Some(PillError::new("处理异常", outcome.warnings.join("\n")))
+        }
+        _ => None,
+    };
+    finish_run(&app, run.id, error).await;
     result
 }
 

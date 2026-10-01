@@ -1,10 +1,11 @@
 import { Check, LoaderCircle, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import type { PillState } from '@/lib/desktop'
+import { previewPillError, type PillError, type PillState } from '@/lib/desktop'
 
 const heights = [9, 11, 15, 19, 23, 29, 34, 26, 19, 13, 10]
 interface Props {
   state: PillState
+  error?: PillError
   level?: number
   onCancel?: () => void
   onDone?: () => void
@@ -12,7 +13,7 @@ interface Props {
 }
 
 // Both the desktop overlay and debug gallery render this exact component.
-export function RecordingPill({ state, level = 0, onCancel, onDone, onDrag }: Props) {
+export function RecordingPill({ state, error = previewPillError, level = 0, onCancel, onDone, onDrag }: Props) {
   const processing = state === 'processing'
   const amplitude = Math.max(0, Math.min(1, level * 12))
   // Keep both shapes at fixed sizes. Resizing one composited surface from the
@@ -22,9 +23,12 @@ export function RecordingPill({ state, level = 0, onCancel, onDone, onDrag }: Pr
       <LoaderCircle className="size-5 animate-spin" aria-hidden="true" />
     </div>
     <div className="recording-pill" data-state={state} aria-hidden={processing} inert={processing} style={{ opacity: processing ? 0 : 1 }}>
-      <Button variant="ghost" size="icon" className="pill-cancel" aria-label="取消录音" onClick={onCancel}>
+      <Button variant="ghost" size="icon" className="pill-cancel" aria-label={state === 'error' ? '关闭错误提示' : '取消录音'} onClick={onCancel}>
         <X aria-hidden="true" />
       </Button>
+      {state === 'error' ? <span className="pill-error pill-draggable" role="alert" aria-label={error.message} title={error.message} onMouseDown={event => { if (event.button === 0) onDrag?.() }}>
+        {error.label}
+      </span> : <>
       <svg className="pill-waveform pill-draggable" onMouseDown={event => { if (event.button === 0) onDrag?.() }} viewBox="0 0 100 40" aria-label={state === 'ready' ? '录音波形' : '平线'} role="img">
         {state === 'ready' ? heights.map((height, index) => {
           const h = Math.max(2, height * amplitude)
@@ -40,6 +44,7 @@ export function RecordingPill({ state, level = 0, onCancel, onDone, onDrag }: Pr
           <LoaderCircle className="size-5 animate-spin" aria-hidden="true" />
         </span>
       )}
+      </>}
     </div>
   </div>
 }

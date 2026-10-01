@@ -9,6 +9,7 @@ const states: { value: PreviewState; label: string }[] = [
   { value: 'unready', label: '未就绪' },
   { value: 'ready', label: '已就绪' },
   { value: 'processing', label: '识别中' },
+  { value: 'error', label: '报错' },
 ]
 
 export function DeveloperOptions({ disabled }: { disabled: boolean }) {

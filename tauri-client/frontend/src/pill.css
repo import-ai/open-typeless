@@ -38,6 +38,9 @@ html[data-window="pill"] body, html[data-window="pill-debug"] body {
 .pill-waveform { display: block; width: 100%; height: 24px; }
 .recording-pill[data-state="disconnected"] .pill-waveform { color: #666; }
 .recording-pill[data-state="unready"] .pill-waveform { color: #999; }
+.recording-pill[data-state="error"] { grid-template-columns: 32px minmax(0, 1fr); background: #450a0a; color: #fecaca; }
+.recording-pill[data-state="error"] .pill-cancel { background: #7f1d1d; }
+.pill-error { display: flex; align-items: center; justify-content: center; padding-right: 10px; font-size: 12px; white-space: nowrap; }
 .pill-debug-gallery { display: flex; flex-direction: column; gap: 16px; padding: 16px 24px; }
 .pill-debug-label { display: table; margin: 0 0 6px; padding: 2px 7px; border-radius: 6px; background: #000b; color: white; font-size: 11px; line-height: 16px; }
 

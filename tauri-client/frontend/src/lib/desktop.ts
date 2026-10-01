@@ -4,7 +4,9 @@ import { loadPreviewDictionary, savePreviewWord, deletePreviewWords, type Dictio
 import { deletePreviewEntry, previewHistory, previewInsights, previewText, type HistoryCursor, type HistoryPage, type Insights, type TranscriptionOutcome } from './history'
 
 export type MicState = 'disconnected' | 'unready' | 'ready'
-export type PillState = MicState | 'processing'
+export type PillState = MicState | 'processing' | 'error'
+export interface PillError { label: string; message: string }
+export const previewPillError: PillError = { label: '后端不可用', message: '无法连接后端，请检查地址和服务状态' }
 export const micLabels: Record<MicState, string> = {
   disconnected: '未连接', unready: '未就绪', ready: '已就绪',
 }
