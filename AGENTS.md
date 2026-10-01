@@ -19,6 +19,7 @@ Open Typeless is a desktop voice input tool: a shortcut starts recording, audio 
 | `cmd/debug-server/` | Local debug server that saves uploaded audio and always returns `foo`, without calling ASR |
 | `internal/buildinfo/` | Server version reported by health checks |
 | `tauri-client/src/main.rs` | Tauri commands, recording, recognition sessions, cancellation, pasting, windows, and settings integration |
+| `tauri-client/src/recording.rs` | Bounded audio capture, shared silence trimming, WAV encoding, and atomic temporary files |
 | `tauri-client/src/streaming.rs`, `cmd/server/stream.go` | Live PCM upload, streaming results, and audio.cpp live inference forwarding |
 | `tauri-client/src/modifier_shortcut.rs` | Native macOS / Windows modifier listeners and standalone key detection |
 | `tauri-client/src/settings_file.rs`, `dictionary.rs` | Settings and dictionary validation, persistence, and Rust tests |
@@ -75,6 +76,7 @@ npm run tauri build     # Desktop packaging; builds the frontend automatically
 - The backend URL is empty by default, and recording is disabled until it is configured. Check health every 30 seconds while idle and before starting a recording.
 - `POST /api/v1/recognitions` accepts `audio` and optional `language` and `hotwords`. Legacy ASR uses raw-body `/transcribe` with dictionary `context`; audio.cpp uses multipart `/v1/audio/transcriptions` with dictionary `prompt`. Omit `language=auto` for audio.cpp. Preserve `raw_text` separately from LLM output; incomplete or failed polishing must fall back to raw text.
 - When changing an interface, check the Go response, Rust serialization types, `frontend/src/lib/desktop.ts`, and their callers together.
+- Live PCM, fallback WAVs, and archived audio must use the same trimmed samples and microphone tail. Respect health's `limits.max_audio_bytes` (12 MiB local ceiling, WAV header included); stop at that limit or four minutes. Temporary write failures retain bounded audio for fallback/history; recognition/history failures retain an existing temporary WAV with a recovery path. Cancellation and empty/successful results clean up their temporary audio.
 - Cancellation must stop the client from waiting and prevent results from cancelled or superseded sessions from reaching the clipboard or being pasted. Preserve session ID checks and temporary recording cleanup; hiding the UI alone is insufficient.
 
 ### Shortcuts and windows

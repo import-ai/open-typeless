@@ -103,7 +103,11 @@ Absent or false capability fields (including older and debug servers) select
 the original multipart endpoint. Failed streams, HTTP errors, malformed replies,
 and missing final events retry the complete WAV once. Cancellation never retries.
 The current UI keeps its waveform during capture; partial text is consumed by
-the transport, and only the final polished text is saved and pasted.
+the transport, and only the final polished text is saved and pasted. Streaming
+starts once two active 10 ms audio windows are detected, retaining 100 ms of
+pre-roll. Live PCM, the fallback WAV, and the archive use the same trimmed
+samples, including the queued 200 ms microphone tail at stop. Silence does not
+open an idle streaming connection.
 
 `POST /api/v1/recognitions/stream` is full duplex HTTP. Its body starts with one
 UTF-8 JSON line (less than 4096 bytes including the newline):
@@ -137,9 +141,16 @@ header and are not forwarded to ASR. Redirects are rejected.
 
 The upload has a 15-second idle deadline and the stream a five-minute lifetime.
 After EOF, ASR has 40 seconds; polishing retains its separate `LLM_TIMEOUT`.
-The desktop waits up to 60 seconds after stopping before falling back. Capture
-queues are bounded; slow networks abort streaming without blocking the microphone
-or discarding the local WAV. HTTP/1 streams use a dedicated connection so rejected
+The desktop waits up to 60 seconds after stopping before falling back; the
+fallback HTTP request also has a 60-second timeout. Health advertises
+`limits.max_audio_bytes`. Capture is bounded by the smaller of that limit and
+12 MiB, reserving the WAV header and complete sample frames. Older servers use
+the 12 MiB default. Capture automatically stops at this byte limit or four
+minutes, whichever comes first, and reports a warning. For 48 kHz stereo the
+default byte limit is about 65.5 seconds. A microphone error also stops capture,
+preserving usable audio and reporting a warning. Capture queues are bounded;
+slow networks abort streaming without blocking the microphone or discarding
+the local WAV. HTTP/1 streams use a dedicated connection so rejected
 or incomplete uploads cannot corrupt a later request.
 
 Reverse proxies must support simultaneous request/response streaming. For nginx,
@@ -170,7 +181,8 @@ Server, and the running GPU audio.cpp `r2t2-asr-stream` model using the public
 Qwen Chinese sample. Both 16 kHz mono and 48 kHz stereo returned the expected
 transcript. The existing multipart endpoint also returned the expected result.
 Physical microphone capture and native clipboard/paste were not exercised by
-these transport checks.
+these transport checks. The expanded file and failure scenarios are recorded in
+[Streaming validation](streaming-validation.md).
 
 ## Debug recording uploads
 
@@ -229,9 +241,9 @@ The complete dictionary is limited to **1000 UTF-8 bytes**, including separators
 
 Rust owns `history.sqlite3` and `recordings/<id>.wav` in the same user directory as settings. `history.rs` uses bundled SQLite through rusqlite, one serialized connection, and `PRAGMA user_version = 1`. Database work and file operations run on blocking workers. Database initialization failures are exposed by history/insights commands without replacing the existing database or preventing dictation.
 
-Each accepted, nonempty recognition archives the uploaded WAV and inserts the raw text, optional polished text, recording timestamp, original local date/UTC offset, Unicode alphanumeric count, and WAV duration. The history insert and `daily_usage` increment share a transaction. Daily totals have no foreign key to deletable history; insights sum them independently. The history cursor orders by `(local_date, started_at_ms, id)` descending and fetches 50 entries per page.
+Each accepted, nonempty recognition archives the recorded WAV and inserts the raw text, optional polished text, recording timestamp, original local date/UTC offset, Unicode alphanumeric count, and WAV duration. The history insert and `daily_usage` increment share a transaction. Daily totals have no foreign key to deletable history; insights sum them independently. The history cursor orders by `(local_date, started_at_ms, id)` descending and fetches 50 entries per page.
 
-Cancellation and acceptance are serialized with the active session. Cancellation before acceptance prevents archiving, accounting, and pasting. Acceptance closes the pill's cancellation UI and keeps the session occupied until storage and paste finish. Duplicate transcription calls are rejected. Storage failures are reported alongside the recognized text and do not prevent a paste attempt; paste failures preserve saved history. `transcribe_file` returns `{text, warnings}`. Committed changes emit `history-changed`; views also refresh on focus and local date changes.
+Cancellation and acceptance are serialized with the active session. Cancellation before acceptance prevents archiving, accounting, and pasting. Acceptance closes the pill's cancellation UI and keeps the session occupied until storage and paste finish. Duplicate transcription calls are rejected. Storage failures are reported alongside the recognized text and do not prevent a paste attempt; paste failures preserve saved history. Temporary WAV publication is atomic and does not overwrite an existing file. If that write fails, bounded WAV bytes remain available for recognition fallback and direct history archiving. If recognition or history storage fails after a WAV was saved, it is retained at the path reported in the error/warning for manual recovery. Successful, empty, and cancelled sessions clean up their temporary WAVs; cleanup failures are reported when finalizing recognition. Recovery files are not automatically imported or removed on restart. `transcribe_file` returns `{text, warnings}`. Committed changes emit `history-changed`; views also refresh on focus and local date changes.
 
 Audio is staged inside the recording directory and published before the database transaction. A failed transaction removes that new audio. A process crash between publication and commit can leave an unreferenced file; startup deliberately does not delete arbitrary unreferenced files. Deletion first persists a `deleting` flag, removes the WAV (missing files count as removed), then deletes the row. Failed deletions remain retryable and are retried at startup, without touching daily totals. These operations use normal filesystem deletion, not forensic erasure or removal from system backups.
 

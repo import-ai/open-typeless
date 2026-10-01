@@ -150,13 +150,24 @@ impl Store {
         raw: &str,
         polished: Option<&str>,
     ) -> Result<()> {
+        self.save_source(stamp, || fs::File::open(source), raw, polished)
+    }
+
+    pub fn save_bytes(&mut self, stamp: &Stamp, data: &[u8], raw: &str, polished: Option<&str>) -> Result<()> {
+        self.save_source(stamp, || Ok(std::io::Cursor::new(data)), raw, polished)
+    }
+
+    fn save_source<R: std::io::Read + std::io::Seek>(
+        &mut self, stamp: &Stamp, source: impl FnOnce() -> std::io::Result<R>, raw: &str, polished: Option<&str>,
+    ) -> Result<()> {
         if raw.trim().is_empty() {
             return Err("未识别到文字".into());
         }
         if self.entry(&stamp.id)?.is_some() {
             return Ok(());
         }
-        let audio = hound::WavReader::open(source).map_err(|e| e.to_string())?;
+        let mut source = source().map_err(|e| e.to_string())?;
+        let audio = hound::WavReader::new(&mut source).map_err(|e| e.to_string())?;
         if audio.spec().sample_rate == 0 {
             return Err("录音采样率无效".into());
         }
@@ -164,14 +175,13 @@ impl Store {
         if duration <= 0 {
             return Err("录音时长无效".into());
         }
+        drop(audio);
+        source.rewind().map_err(|e| e.to_string())?;
         let count = raw.chars().filter(|c| c.is_alphanumeric()).count() as i64;
         let path = self.path(&stamp.id)?;
         let mut staged =
             tempfile::NamedTempFile::new_in(&self.recordings).map_err(|e| e.to_string())?;
-        std::io::copy(
-            &mut fs::File::open(source).map_err(|e| e.to_string())?,
-            &mut staged,
-        )
+        std::io::copy(&mut source, &mut staged)
         .map_err(|e| e.to_string())?;
         staged.as_file().sync_all().map_err(|e| e.to_string())?;
         staged.persist_noclobber(&path).map_err(|e| e.to_string())?;
@@ -419,6 +429,16 @@ mod tests {
         assert!(store.page(None).unwrap().entries.is_empty());
         assert!(store.insights().unwrap().days.is_empty());
         assert!(!store.path(&stamp.id).unwrap().exists());
+        // A failed history transaction must not erase the recoverable capture.
+        crate::cleanup_recording(&source, true).unwrap();
+        assert!(source.exists());
+        let data = fs::read(&source).unwrap();
+        store.db.execute_batch("DROP TRIGGER reject_usage").unwrap();
+        store.save_bytes(&stamp, &data, "hello", None).unwrap();
+        assert_eq!(fs::read(store.recording(&stamp.id).unwrap()).unwrap(), data);
+        assert_eq!(store.insights().unwrap().character_count, 5);
+        crate::cleanup_recording(&source, false).unwrap();
+        assert!(!source.exists());
         drop(store);
         let broken = tempfile::tempdir().unwrap();
         let path = broken.path().join("history.sqlite3");

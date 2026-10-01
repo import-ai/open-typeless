@@ -71,7 +71,8 @@ func (s *server) handler(apiKey string) http.Handler {
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": buildinfo.Version,
-		"capabilities": map[string]bool{"streaming_asr": s.inferenceStreamModel != ""}})
+		"capabilities": map[string]bool{"streaming_asr": s.inferenceStreamModel != ""},
+		"limits":       map[string]int64{"max_audio_bytes": s.maxBytes}})
 }
 
 func (s *server) recognize(w http.ResponseWriter, r *http.Request) {

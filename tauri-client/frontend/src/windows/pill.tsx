@@ -17,7 +17,7 @@ export function PillWindow() {
     return () => clearInterval(timer)
   }, [preview, state])
   useTauriEvent('pill-hidden', () => { setPreview(false); setState('disconnected'); setLevel(0) })
-  useTauriEvent<MicState>('mic-state', next => setState(current => current === 'error' ? current : next))
+  useTauriEvent<MicState>('mic-state', next => setState(current => current === 'error' || current === 'processing' ? current : next))
   useTauriEvent<PillError>('recording-error', next => { setPreview(false); setError(next); setState('error'); setLevel(0) })
   useTauriEvent<number>('mic-level', setLevel)
   useTauriEvent('recording-starting', () => { setPreview(false); setState('unready'); setLevel(0) })
