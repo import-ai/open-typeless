@@ -16,12 +16,13 @@ import (
 )
 
 type server struct {
-	inferenceURL      string
-	inferenceProtocol string
-	inferenceModel    string
-	polisher          *polisher
-	client            *http.Client
-	maxBytes          int64
+	inferenceURL         string
+	inferenceProtocol    string
+	inferenceStreamModel string
+	inferenceModel       string
+	polisher             *polisher
+	client               *http.Client
+	maxBytes             int64
 }
 
 type recognitionResponse struct {
@@ -41,15 +42,19 @@ func main() {
 		log.Fatal(err)
 	}
 	s := &server{
-		inferenceURL:      strings.TrimRight(env("INFERENCE_URL", "http://localhost:18080"), "/"),
-		inferenceProtocol: env("INFERENCE_PROTOCOL", "legacy"),
-		inferenceModel:    env("INFERENCE_MODEL", "r2t2-asr"),
-		polisher:          polish,
-		client:            &http.Client{Timeout: 45 * time.Second},
-		maxBytes:          envInt64("MAX_AUDIO_BYTES", 12<<20),
+		inferenceURL:         strings.TrimRight(env("INFERENCE_URL", "http://localhost:18080"), "/"),
+		inferenceProtocol:    env("INFERENCE_PROTOCOL", "legacy"),
+		inferenceStreamModel: strings.TrimSpace(os.Getenv("INFERENCE_STREAM_MODEL")),
+		inferenceModel:       env("INFERENCE_MODEL", "r2t2-asr"),
+		polisher:             polish,
+		client:               &http.Client{Timeout: 45 * time.Second},
+		maxBytes:             envInt64("MAX_AUDIO_BYTES", 12<<20),
 	}
 	if s.inferenceProtocol != "legacy" && s.inferenceProtocol != "audiocpp" {
 		log.Fatal("INFERENCE_PROTOCOL must be legacy or audiocpp")
+	}
+	if s.inferenceStreamModel != "" && s.inferenceProtocol != "audiocpp" {
+		log.Fatal("INFERENCE_STREAM_MODEL requires INFERENCE_PROTOCOL=audiocpp")
 	}
 	addr := env("HTTP_ADDR", ":8080")
 	log.Printf("open-typeless business server listening on %s, inference=%s", addr, s.inferenceURL)
@@ -60,11 +65,13 @@ func (s *server) handler(apiKey string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", s.health)
 	mux.HandleFunc("/api/v1/recognitions", s.recognize)
+	mux.HandleFunc("/api/v1/recognitions/stream", s.recognizeStream)
 	return logging(cors(requireAPIKey(apiKey, mux)))
 }
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": buildinfo.Version})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": buildinfo.Version,
+		"capabilities": map[string]bool{"streaming_asr": s.inferenceStreamModel != ""}})
 }
 
 func (s *server) recognize(w http.ResponseWriter, r *http.Request) {
@@ -144,22 +151,10 @@ func (s *server) recognize(w http.ResponseWriter, r *http.Request) {
 			asr.Language = language
 		}
 	}
-	polished := asr.RawText
-	if s.polisher != nil && strings.TrimSpace(asr.RawText) != "" && r.Context().Err() == nil {
-		// Polishing has its own budget, independent of the ASR timeout.
-		text, err := s.polisher.polish(r.Context(), asr.RawText)
-		if err != nil {
-			if r.Context().Err() == nil {
-				log.Printf("polishing failed; returning raw transcript: %v", err)
-			}
-		} else {
-			polished = text
-		}
+	result := s.polishRecognition(r.Context(), asr.RawText, asr.Language, asr.AudioDurationMS)
+	if r.Context().Err() == nil {
+		writeJSON(w, http.StatusOK, result)
 	}
-	if r.Context().Err() != nil {
-		return
-	}
-	writeJSON(w, http.StatusOK, recognitionResponse{RawText: asr.RawText, PolishedText: polished, Language: asr.Language, DurationMS: asr.AudioDurationMS})
 }
 
 func env(k, fallback string) string {

@@ -2,6 +2,7 @@ mod dictionary;
 mod history;
 mod modifier_shortcut;
 mod settings_file;
+mod streaming;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use modifier_shortcut::is_modifier;
@@ -50,6 +51,8 @@ struct TranscriptionRun {
     cancelled: AtomicBool,
     notification: tokio::sync::Notify,
     capture_stop: Mutex<Option<mpsc::Sender<()>>>,
+    streaming_enabled: AtomicBool,
+    streaming_result: Mutex<Option<tokio::sync::oneshot::Receiver<Result<Recognition, String>>>>,
 }
 impl TranscriptionRun {
     fn new(id: u64) -> Self {
@@ -63,6 +66,8 @@ impl TranscriptionRun {
             cancelled: AtomicBool::new(false),
             notification: tokio::sync::Notify::new(),
             capture_stop: Mutex::new(None),
+            streaming_enabled: AtomicBool::new(false),
+            streaming_result: Mutex::new(None),
         }
     }
     fn begin_transcription(&self) -> Result<(), String> {
@@ -76,7 +81,7 @@ impl TranscriptionRun {
         // Callers serialize cancellation and result acceptance with the active-run lock.
         if self.finalizing.load(Ordering::SeqCst) { return false; }
         self.cancelled.store(true, Ordering::SeqCst);
-        self.notification.notify_one();
+        self.notification.notify_waiters();
         if let Ok(stop) = self.capture_stop.lock() {
             if let Some(stop) = stop.as_ref() {
                 let _ = stop.send(());
@@ -92,8 +97,11 @@ impl TranscriptionRun {
         }
     }
     async fn cancellation(&self) {
+        let notified = self.notification.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if self.check().is_ok() {
-            self.notification.notified().await;
+            notified.await;
         }
     }
 }
@@ -551,7 +559,9 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
         tokio::select! {
             biased;
             _ = run.cancellation() => return Err(CANCELLED.into()),
-            result = check_backend(&run.backend.server_url, &run.backend.api_key) => result?,
+            result = backend_capabilities(&run.backend.server_url, &run.backend.api_key) => {
+                run.streaming_enabled.store(result?, Ordering::SeqCst);
+            },
         }
         error_label = "录音失败";
         // Native shortcut registration must run on the UI thread. Never hold
@@ -724,7 +734,24 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
                 }
             }
             ready_tx.send(Ok(())).map_err(|e| e.to_string())?;
-            stop_rx.recv().map_err(|e| e.to_string())?;
+            let mut upload = if capture_run.streaming_enabled.load(Ordering::SeqCst) {
+                Some(streaming::start(capture_run.clone(), sample_rate, channels))
+            } else {
+                None
+            };
+            let mut sent = 0;
+            loop {
+                if let Some(upload) = upload.as_mut() {
+                    let captured = samples.lock().map_err(|e| e.to_string())?;
+                    upload.send(&captured[sent..]);
+                    sent = captured.len();
+                }
+                match stop_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(()) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
             // The input device can have one callback already queued when the
             // user releases the hotkey/button. Keep the stream alive briefly
             // so the tail of the utterance reaches `samples` before closing.
@@ -732,6 +759,10 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
             drop(stream);
             capture_run.check()?;
             let captured = samples.lock().map_err(|e| e.to_string())?.clone();
+            if let Some(upload) = upload.as_mut() {
+                upload.send(&captured[sent..]);
+            }
+            drop(upload); // EOF flushes the ASR model; keep the WAV for history/fallback.
             let samples = trim_leading_silence(&captured, channels as usize, sample_rate)?;
             let path = recording_path(capture_run.id);
             let spec = hound::WavSpec {
@@ -1205,7 +1236,17 @@ async fn recognize_for_run(
     tokio::select! {
         biased;
         _ = run.cancellation() => Err(CANCELLED.into()),
-        result = recognize(url, path, &run.hotwords, &run.backend.api_key) => result,
+        result = async {
+            let streaming = run.streaming_result.lock().map_err(|e| e.to_string())?.take();
+            if let Some(result) = streaming {
+                if let Ok(Ok(Ok(recognition))) = tokio::time::timeout(Duration::from_secs(60), result).await {
+                    run.check()?;
+                    return Ok(recognition);
+                }
+                run.check()?;
+            }
+            recognize(url, path, &run.hotwords, &run.backend.api_key).await
+        } => result,
     }
 }
 
@@ -1367,6 +1408,10 @@ fn recognition_url(base: &str) -> Result<String, String> {
 }
 
 async fn check_backend(base: &str, api_key: &str) -> Result<(), String> {
+    backend_capabilities(base, api_key).await.map(|_| ())
+}
+
+async fn backend_capabilities(base: &str, api_key: &str) -> Result<bool, String> {
     let base = normalize_server_url(base)?;
     if base.is_empty() {
         return Err("后端地址未设置".into());
@@ -1381,7 +1426,7 @@ async fn check_backend(base: &str, api_key: &str) -> Result<(), String> {
     if body.get("status").and_then(|status| status.as_str()) != Some("ok") {
         return Err("后端健康检查未通过".into());
     }
-    Ok(())
+    Ok(body.pointer("/capabilities/streaming_asr").and_then(|value| value.as_bool()) == Some(true))
 }
 
 #[tauri::command]

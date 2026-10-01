@@ -56,7 +56,8 @@ applied to the inserted text. An empty `samples` array disables Few-Shot
 examples. Invalid JSON or a missing placeholder fails startup when polishing
 is enabled.
 
-Both `/api/v1/health` and `/api/v1/recognitions` require
+All endpoints, including `/api/v1/health`, `/api/v1/recognitions`, and
+`/api/v1/recognitions/stream`, require
 `Authorization: Bearer <key>`. Missing or incorrect keys return HTTP 401 before
 reading uploaded audio or calling inference. Only CORS preflight is anonymous.
 Keys in query parameters are not accepted. Use HTTPS for public deployments;
@@ -74,6 +75,102 @@ The desktop key is stored unencrypted in `~/.open-typeless/settings.json`
 atomic settings writes. Do not share this file. Older settings files load with
 an empty key and retain their other preferences. The local debug server remains
 unauthenticated and is intended only for local testing.
+
+## Streaming ASR
+
+Streaming is opt-in on the Business Server and automatic on the desktop. Keep
+`INFERENCE_MODEL` pointed at the existing offline model and set
+`INFERENCE_STREAM_MODEL` to an audio.cpp model registered with `mode: streaming`:
+
+```sh
+BACKEND_API_KEY=local-development-key \
+INFERENCE_URL=http://127.0.0.1:18080 \
+INFERENCE_PROTOCOL=audiocpp \
+INFERENCE_MODEL=r2t2-asr \
+INFERENCE_STREAM_MODEL=r2t2-asr-stream \
+go run ./cmd/server
+```
+
+An empty `INFERENCE_STREAM_MODEL` disables streaming and retains the original
+API. Setting it with the legacy inference protocol fails startup. Existing
+legacy Python ASR deployments continue to use the offline interface. The model
+ID must exist in the running audio.cpp service; repository configuration alone
+does not establish that. See the [audio.cpp live endpoint documentation](https://github.com/0xShug0/audio.cpp/blob/main/app/server/README.md#post-v1audiotranscriptionslive).
+
+`GET /api/v1/health` returns `capabilities: {"streaming_asr": true}` when enabled.
+The client checks this before each recording using the same URL/key snapshot.
+Absent or false capability fields (including older and debug servers) select
+the original multipart endpoint. Failed streams, HTTP errors, malformed replies,
+and missing final events retry the complete WAV once. Cancellation never retries.
+The current UI keeps its waveform during capture; partial text is consumed by
+the transport, and only the final polished text is saved and pasted.
+
+`POST /api/v1/recognitions/stream` is full duplex HTTP. Its body starts with one
+UTF-8 JSON line (less than 4096 bytes including the newline):
+
+```json
+{"sample_rate":48000,"channels":2,"language":"auto","hotwords":"OAuth\nOpen Typeless"}
+```
+
+Following bytes are raw interleaved signed 16-bit little-endian PCM at the
+specified microphone rate/channel count. No WAV header, resampling, or base64
+encoding is required. Supported rates are 8000–192000 Hz and channel counts are
+1–8. Hotwords retain the 1000 UTF-8 byte limit. Request EOF ends capture and
+flushes inference. PCM is bounded by `MAX_AUDIO_BYTES` (12 MiB by default);
+empty audio and incomplete sample frames are rejected.
+
+Responses use `application/x-ndjson`, flushed after each event:
+
+```json
+{"type":"ready"}
+{"type":"partial","text":"Recognized fragment"}
+{"type":"final","result":{"raw_text":"Complete transcript","polished_text":"Complete transcript.","language":"auto","duration_ms":4200}}
+```
+
+`partial.text` is a delta. `ready` acknowledges the transport, not upstream
+model readiness. An `error` event ends an unsuccessful stream. EOF without a
+`final` event is a failure; partial transcripts are never substituted for a
+complete result. Final results share the offline polishing prompt and raw-text
+fallback. The Go server forwards PCM to audio.cpp's live endpoint and validates
+its SSE final event before polishing. Credentials remain in the Authorization
+header and are not forwarded to ASR. Redirects are rejected.
+
+The upload has a 15-second idle deadline and the stream a five-minute lifetime.
+After EOF, ASR has 40 seconds; polishing retains its separate `LLM_TIMEOUT`.
+The desktop waits up to 60 seconds after stopping before falling back. Capture
+queues are bounded; slow networks abort streaming without blocking the microphone
+or discarding the local WAV. HTTP/1 streams use a dedicated connection so rejected
+or incomplete uploads cannot corrupt a later request.
+
+Reverse proxies must support simultaneous request/response streaming. For nginx,
+use `proxy_http_version 1.1`, `proxy_request_buffering off`, `proxy_buffering off`,
+and read/send timeouts longer than five minutes for this route. Request buffering
+prevents live recognition even if the health check advertises support.
+
+Run `go test -race ./...`, `go vet ./...`, and `cargo test --locked` to check
+live upload, fragmented replies, cancellation, authentication, old-server
+compatibility, and complete-WAV fallback. An optional test exercises the actual
+Rust transport through a running Business Server and ASR with a 16-bit PCM WAV:
+
+```sh
+cd tauri-client
+# Export OPEN_TYPELESS_TEST_API_KEY separately with the test server's key.
+OPEN_TYPELESS_TEST_BASE_URL=http://127.0.0.1:8080/api/v1 \
+OPEN_TYPELESS_TEST_WAV=/absolute/path/to/sample.wav \
+cargo test --locked streaming::tests::live_backend_smoke -- --ignored
+```
+
+Set `OPEN_TYPELESS_TEST_EXPECTED` to assert an exact transcript. This test sends
+100 ms chunks at recording speed and requires a streaming final result; it cannot
+pass through offline fallback. It does not exercise physical microphone access,
+native shortcuts, clipboard permissions, or pasting into another application.
+
+Validation on 2026-10-01 passed through the Rust transport, a local Business
+Server, and the running GPU audio.cpp `r2t2-asr-stream` model using the public
+Qwen Chinese sample. Both 16 kHz mono and 48 kHz stereo returned the expected
+transcript. The existing multipart endpoint also returned the expected result.
+Physical microphone capture and native clipboard/paste were not exercised by
+these transport checks.
 
 ## Debug recording uploads
 
@@ -110,7 +207,7 @@ The pill initially appears centered horizontally on the main screen, with its bo
 
 The macOS default shortcut is `RCommand`: press and release right Command by itself to start recording, then repeat to stop and recognize. Using another key, modifier, or mouse click while holding it cancels that shortcut activation, so combinations such as right Command+C do not start recording. Native AppKit local and global event listeners implement this behavior and require accessibility permission. The UI shows a prompt if permission is missing; restart the application after granting it. Windows defaults to standalone right Control (`RControl`), detected through a native keyboard listener. In settings, capture a single key or a conventional key combination; it takes effect on release. The shortcut, backend URL, and API key are saved automatically and restored at the next launch.
 
-After recording stops, the client creates a temporary WAV and uploads it to the Business Server. It writes nonempty `polished_text` to the clipboard, falling back to `raw_text` when the field is absent, null, or blank, and simulates `Ctrl/Command+V` to paste into the current window. The server URL is empty by default. Enter a backend address in the main window's settings tab; pressing Enter or moving focus saves it automatically. Use `http://127.0.0.1:8080/api/v1` for a local service or, for example, `https://example.com/api/v1` behind a reverse proxy. The client treats this as the complete API base URL and appends only `/recognitions` for recognition requests.
+The client streams PCM during recording when the health check advertises streaming support. It also creates a temporary WAV after recording stops for local history and offline fallback. Without streaming support, or when the stream fails, it uploads that complete WAV to the Business Server. It writes nonempty `polished_text` to the clipboard, falling back to `raw_text` when the field is absent, null, or blank, and simulates `Ctrl/Command+V` to paste into the current window. The server URL is empty by default. Enter a backend address in the main window's settings tab; pressing Enter or moving focus saves it automatically. Use `http://127.0.0.1:8080/api/v1` for a local service or, for example, `https://example.com/api/v1` behind a reverse proxy. The client treats this as the complete API base URL and appends `/recognitions` or `/recognitions/stream` for recognition requests.
 
 Shortcut capture starts only when the input itself is clicked. Press the desired keys and release them to apply the shortcut without a save button. Ordinary single keys and standalone left/right Command, Ctrl, Shift, and Alt are supported, as are modifier-plus-key combinations. Click elsewhere to cancel capture. Esc can also be the activation key, but it still cancels recognition while the pill is visible. Recording is disabled until the backend URL is configured. Regular `tauri dev` does not show developer options.
 
@@ -124,7 +221,7 @@ The main window's dictionary tab supports adding, editing, searching, individual
 
 The dictionary is stored in `dictionary.json` alongside settings, using versioned JSON and atomic writes, and is restored on restart. Browser previews use separate localStorage and do not modify the desktop dictionary.
 
-Each recording starts with a fixed dictionary snapshot. When recording stops, all terms are joined with newlines and uploaded as `hotwords`; the Go server forwards them to ASR as `context` (legacy) or `prompt` (audio.cpp). Dictionary edits take effect on the next recording. Dictionary terms are recognition hints whose effectiveness depends on the ASR model, without forced replacement. Optional LLM polishing runs after ASR; the client returns and pastes the same selected output text.
+Each recording starts with a fixed dictionary snapshot. All terms are joined with newlines and sent as `hotwords` in the initial stream configuration or the completed WAV upload; the Go server forwards them to ASR as `context` (legacy) or `prompt` (audio.cpp). Dictionary edits take effect on the next recording. Dictionary terms are recognition hints whose effectiveness depends on the ASR model, without forced replacement. Optional LLM polishing runs after ASR; the client returns and pastes the same selected output text.
 
 The complete dictionary is limited to **1000 UTF-8 bytes**, including separators, matching the Go API limit. Additions and edits are validated in advance; exceeding the limit produces an explicit error without silent truncation. Corrupt dictionary files produce an error and are preserved.
 

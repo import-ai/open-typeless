@@ -9,7 +9,7 @@ import (
 
 func TestAPIKeyProtectsAllRoutes(t *testing.T) {
 	s := &server{maxBytes: 12 << 20}
-	for _, path := range []string{"/api/v1/health", "/api/v1/recognitions"} {
+	for _, path := range []string{"/api/v1/health", "/api/v1/recognitions", "/api/v1/recognitions/stream"} {
 		for _, tc := range []struct {
 			name    string
 			headers []string
@@ -35,6 +35,9 @@ func TestAPIKeyProtectsAllRoutes(t *testing.T) {
 					expected := http.StatusOK
 					if path == "/api/v1/recognitions" {
 						expected = http.StatusBadRequest
+					}
+					if path == "/api/v1/recognitions/stream" {
+						expected = http.StatusNotImplemented
 					}
 					if w.Code != expected {
 						t.Fatalf("authenticated request got %d", w.Code)
