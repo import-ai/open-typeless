@@ -42,7 +42,7 @@
         "label": "pill-debug",
         "title": "Open Typeless pill states",
         "width": 300,
-        "height": 384,
+        "height": 416,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,

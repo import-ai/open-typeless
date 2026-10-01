@@ -7,6 +7,7 @@ const states: { state: PillState; label: string }[] = [
   { state: 'unready', label: '未就绪' },
   { state: 'ready', label: '已就绪' },
   { state: 'processing', label: '识别中' },
+  { state: 'error', label: '报错' },
 ]
 export function PillDebug() {
   const [level, setLevel] = useState(0.06)

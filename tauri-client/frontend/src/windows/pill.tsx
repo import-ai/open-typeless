@@ -3,20 +3,22 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { emitTo } from '@tauri-apps/api/event'
 import { RecordingPill } from '@/components/recording-pill'
 import { useTauriEvent } from '@/hooks/use-tauri-event'
-import { commands, desktop, type MicState, type PillState } from '@/lib/desktop'
+import { commands, desktop, previewPillError, type MicState, type PillError, type PillState } from '@/lib/desktop'
 
 export function PillWindow() {
   const [state, setState] = useState<PillState>('unready')
   const [level, setLevel] = useState(0)
   const [preview, setPreview] = useState(false)
-  useTauriEvent<PillState>('pill-preview', (next) => { setPreview(true); setState(next); setLevel(0.06) })
+  const [error, setError] = useState(previewPillError)
+  useTauriEvent<PillState>('pill-preview', (next) => { setPreview(true); setState(next); setError(previewPillError); setLevel(0.06) })
   useEffect(() => {
     if (!preview || state !== 'ready') return
     const timer = setInterval(() => setLevel(0.04 + Math.random() * 0.04), 180)
     return () => clearInterval(timer)
   }, [preview, state])
   useTauriEvent('pill-hidden', () => { setPreview(false); setState('disconnected'); setLevel(0) })
-  useTauriEvent<MicState>('mic-state', setState)
+  useTauriEvent<MicState>('mic-state', next => setState(current => current === 'error' ? current : next))
+  useTauriEvent<PillError>('recording-error', next => { setPreview(false); setError(next); setState('error'); setLevel(0) })
   useTauriEvent<number>('mic-level', setLevel)
   useTauriEvent('recording-starting', () => { setPreview(false); setState('unready'); setLevel(0) })
   useTauriEvent('recording-processing', () => setState('processing'))
@@ -40,6 +42,6 @@ export function PillWindow() {
     void emitTo('main', name).catch((error: unknown) => console.error(error))
   }
   return <div className="pill-stage">
-    <RecordingPill onDrag={drag} state={state} level={level} onCancel={() => request('cancel-requested')} onDone={() => request('stop-requested')} />
+    <RecordingPill onDrag={drag} state={state} error={error} level={level} onCancel={() => request('cancel-requested')} onDone={() => request('stop-requested')} />
   </div>
 }
