@@ -585,7 +585,6 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
     .await;
     if let Err(error) = &result {
         finish_run(&app, run.id, Some(PillError::new(error_label, error))).await;
-        run.cancel();
     }
     result
 }
@@ -1159,7 +1158,7 @@ async fn stop_recording(app: AppHandle) -> Result<RecordingFile, String> {
     })
     .await
     .map_err(|e| e.to_string())
-    .and_then(|result| result);
+    .flatten();
     match result {
         Ok(path) if run.check().is_ok() => Ok(RecordingFile {
             path: path.to_string_lossy().to_string(),
