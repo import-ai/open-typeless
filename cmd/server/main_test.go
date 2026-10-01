@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -11,6 +12,20 @@ import (
 	"sync/atomic"
 	"testing"
 )
+
+func TestHealthPublishesConfiguredAudioLimit(t *testing.T) {
+	s := &server{maxBytes: 123456, inferenceStreamModel: "live"}
+	w := httptest.NewRecorder()
+	s.health(w, httptest.NewRequest(http.MethodGet, "/api/v1/health", nil))
+	var body struct {
+		Limits struct {
+			MaxBytes int64 `json:"max_audio_bytes"`
+		} `json:"limits"`
+	}
+	if json.Unmarshal(w.Body.Bytes(), &body) != nil || body.Limits.MaxBytes != 123456 {
+		t.Fatalf("incorrect recording limit: %s", w.Body.String())
+	}
+}
 
 func TestRecognitionForwardsDictionaryContext(t *testing.T) {
 	for _, hotwords := range []string{"", "OAuth\n语音\nego Lite\nAGENTS.md", strings.Repeat("a", 1000)} {

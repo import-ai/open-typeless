@@ -21,6 +21,7 @@ export function MainWindow() {
   const [phase, setPhase] = useState<Phase>('idle')
   const phaseRef = useRef<Phase>('idle')
   const busy = useRef(false)
+  const stopPending = useRef(false)
   const epoch = useRef(0)
   const pillVisible = useRef(false)
   const [mic, setMic] = useState<MicState>('disconnected')
@@ -48,7 +49,7 @@ export function MainWindow() {
   const [saving, setSaving] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const changePhase = (next: Phase) => { phaseRef.current = next; setPhase(next) }
-  const reset = () => { changePhase('idle'); setMic('disconnected') }
+  const reset = () => { stopPending.current = false; changePhase('idle'); setMic('disconnected') }
   useEffect(() => {
     if (!desktop) return
     let active = true
@@ -103,12 +104,20 @@ export function MainWindow() {
     } catch (error) {
       if (epoch.current !== current) return
       setStatus(String(error)); reset()
-    } finally { if (epoch.current === current) busy.current = false }
+    } finally {
+      if (epoch.current === current) {
+        busy.current = false
+        if (stopPending.current) {
+          stopPending.current = false
+          void stop()
+        }
+      }
+    }
   }
   async function transcribe(file: RecordingFile, current: number) {
     if (epoch.current !== current) return
     changePhase('processing')
-    setStatus('正在上传和识别…')
+    setStatus('正在完成识别…')
     try {
       const result = await commands.transcribe(file)
       if (epoch.current === current) setStatus([result.text || '未识别到文字', ...result.warnings].join('\n'))
@@ -146,7 +155,10 @@ export function MainWindow() {
   useTauriEvent('toggle-requested', () => {
     if (!capturingShortcutRef.current && !dictionaryInputActive.current && !historyInputActive.current && !backendInputActive.current) void (phaseRef.current === 'recording' ? stop() : start())
   })
-  useTauriEvent('stop-requested', () => { void stop() })
+  useTauriEvent('stop-requested', () => {
+    if (phaseRef.current === 'starting') stopPending.current = true
+    else void stop()
+  })
   useTauriEvent('cancel-requested', () => { void cancel() })
   useTauriEvent('recording-cancelled', () => {
     // Invalidate every pending start/stop/upload continuation immediately.

@@ -2,11 +2,12 @@
 
 ## Current implementation and boundaries
 
-Open Typeless is a desktop voice input tool: a shortcut starts recording, the completed recording is uploaded in one request, and the recognized text is inserted into the current application through the clipboard and a simulated paste. Recognition is not streamed, and the client does not load an ASR model.
+Open Typeless is a desktop voice input tool: a shortcut starts recording, audio is streamed when the backend advertises support (otherwise the completed WAV is uploaded), and the final recognized text is inserted into the current application through the clipboard and a simulated paste. The client does not load an ASR model.
 
 - Desktop: Tauri 2 + Rust, with React + TypeScript + Vite + Tailwind CSS + shadcn/ui on the frontend.
 - Business service: a Go HTTP server that forwards multipart audio to a separate ASR service, then optionally polishes its transcript through an OpenAI-compatible LLM.
-- Inference uses HTTP: legacy `/transcribe` or audio.cpp `/v1/audio/transcriptions`, selected by `INFERENCE_PROTOCOL`. `LLM_BASE_URL` enables the approved 3-shot polishing prompt; failures fall back to raw text. The client pastes nonempty `polished_text`, falling back to `raw_text` for older servers.
+- Live ASR uses audio.cpp `/v1/audio/transcriptions/live` when `INFERENCE_STREAM_MODEL` names a streaming model. Authenticated health checks advertise `capabilities.streaming_asr`; the client uses `/recognitions/stream` and falls back to the complete WAV on failure. Only explicit final results may be accepted, archived, or pasted.
+- Offline inference uses HTTP: legacy `/transcribe` or audio.cpp `/v1/audio/transcriptions`, selected by `INFERENCE_PROTOCOL`. `LLM_BASE_URL` enables the approved 3-shot polishing prompt; failures fall back to raw text. The client pastes nonempty `polished_text`, falling back to `raw_text` for older servers.
 - `prd.md` describes product goals, including gRPC that is not implemented yet. Use source code and configuration to determine current behavior; do not describe planned features as implemented.
 - Keep `README.md` focused on end-user installation and usage. Put development, debugging, and build details in `docs/development.md` and frontend conventions in `docs/frontend.md`. Server deployment and API notes are archived locally in `docs/archive/deployment.md`, which is ignored by Git. Local ASR experiments are documented in `deploy/asr/README.md`. Deployment documentation includes historical experiments; the current `deploy/asr/compose.yaml` uses R2T2. Do not infer that Qwen is running from an image name alone, or treat repository configuration as proof of remote runtime state.
 
@@ -18,6 +19,8 @@ Open Typeless is a desktop voice input tool: a shortcut starts recording, the co
 | `cmd/debug-server/` | Local debug server that saves uploaded audio and always returns `foo`, without calling ASR |
 | `internal/buildinfo/` | Server version reported by health checks |
 | `tauri-client/src/main.rs` | Tauri commands, recording, recognition sessions, cancellation, pasting, windows, and settings integration |
+| `tauri-client/src/recording.rs` | Bounded audio capture, shared silence trimming, WAV encoding, and atomic temporary files |
+| `tauri-client/src/streaming.rs`, `cmd/server/stream.go` | Live PCM upload, streaming results, and audio.cpp live inference forwarding |
 | `tauri-client/src/modifier_shortcut.rs` | Native macOS / Windows modifier listeners and standalone key detection |
 | `tauri-client/src/settings_file.rs`, `dictionary.rs` | Settings and dictionary validation, persistence, and Rust tests |
 | `tauri-client/frontend/src/windows/` | Main, pill, and pill-debug windows |
@@ -68,11 +71,12 @@ npm run tauri build     # Desktop packaging; builds the frontend automatically
 
 ### API and recognition sessions
 
-- The client stores a complete API base URL, such as `http://127.0.0.1:8080/api/v1`. Append only `/health` or `/recognitions`; do not duplicate `/api/v1`.
+- The client stores a complete API base URL, such as `http://127.0.0.1:8080/api/v1`. Append only `/health`, `/recognitions`, or `/recognitions/stream`; do not duplicate `/api/v1`.
 - Backend requests send the configured API key in `Authorization: Bearer ...`; never put it in URLs or logs. The server fails startup without `BACKEND_API_KEY`. Keep the URL/key pair atomic and reject client HTTP redirects.
 - The backend URL is empty by default, and recording is disabled until it is configured. Check health every 30 seconds while idle and before starting a recording.
 - `POST /api/v1/recognitions` accepts `audio` and optional `language` and `hotwords`. Legacy ASR uses raw-body `/transcribe` with dictionary `context`; audio.cpp uses multipart `/v1/audio/transcriptions` with dictionary `prompt`. Omit `language=auto` for audio.cpp. Preserve `raw_text` separately from LLM output; incomplete or failed polishing must fall back to raw text.
 - When changing an interface, check the Go response, Rust serialization types, `frontend/src/lib/desktop.ts`, and their callers together.
+- Live PCM, fallback WAVs, and archived audio must use the same trimmed samples and microphone tail. Respect health's `limits.max_audio_bytes` (12 MiB local ceiling, WAV header included); stop at that limit or four minutes. Temporary write failures retain bounded audio for fallback/history; recognition/history failures retain an existing temporary WAV with a recovery path. Cancellation and empty/successful results clean up their temporary audio.
 - Cancellation must stop the client from waiting and prevent results from cancelled or superseded sessions from reaching the clipboard or being pasted. Preserve session ID checks and temporary recording cleanup; hiding the UI alone is insufficient.
 
 ### Shortcuts and windows

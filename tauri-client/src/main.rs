@@ -1,7 +1,9 @@
 mod dictionary;
 mod history;
+mod recording;
 mod modifier_shortcut;
 mod settings_file;
+mod streaming;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use modifier_shortcut::is_modifier;
@@ -21,6 +23,13 @@ struct RecordingSession {
     run: Arc<TranscriptionRun>,
     stop: mpsc::Sender<()>,
     done: mpsc::Receiver<Result<PathBuf, String>>,
+}
+impl RecordingSession {
+    fn finish(self) -> Result<PathBuf, String> {
+        // The capture worker may already have stopped at a limit or device error.
+        let _ = self.stop.send(());
+        self.done.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?
+    }
 }
 struct AppState {
     recorder: Mutex<Option<RecordingSession>>,
@@ -50,6 +59,13 @@ struct TranscriptionRun {
     cancelled: AtomicBool,
     notification: tokio::sync::Notify,
     capture_stop: Mutex<Option<mpsc::Sender<()>>>,
+    streaming_enabled: AtomicBool,
+    max_audio_bytes: AtomicU64,
+    recording_bytes: Mutex<Option<Vec<u8>>>,
+    recording_saved: AtomicBool,
+    warnings: Mutex<Vec<String>>,
+    capture_error: Mutex<Option<String>>,
+    streaming_result: Mutex<Option<tokio::sync::oneshot::Receiver<Result<Recognition, String>>>>,
 }
 impl TranscriptionRun {
     fn new(id: u64) -> Self {
@@ -63,6 +79,13 @@ impl TranscriptionRun {
             cancelled: AtomicBool::new(false),
             notification: tokio::sync::Notify::new(),
             capture_stop: Mutex::new(None),
+            streaming_enabled: AtomicBool::new(false),
+            max_audio_bytes: AtomicU64::new(recording::MAX_AUDIO_BYTES as u64),
+            recording_bytes: Mutex::new(None),
+            recording_saved: AtomicBool::new(false),
+            warnings: Mutex::new(Vec::new()),
+            capture_error: Mutex::new(None),
+            streaming_result: Mutex::new(None),
         }
     }
     fn begin_transcription(&self) -> Result<(), String> {
@@ -76,7 +99,7 @@ impl TranscriptionRun {
         // Callers serialize cancellation and result acceptance with the active-run lock.
         if self.finalizing.load(Ordering::SeqCst) { return false; }
         self.cancelled.store(true, Ordering::SeqCst);
-        self.notification.notify_one();
+        self.notification.notify_waiters();
         if let Ok(stop) = self.capture_stop.lock() {
             if let Some(stop) = stop.as_ref() {
                 let _ = stop.send(());
@@ -92,8 +115,11 @@ impl TranscriptionRun {
         }
     }
     async fn cancellation(&self) {
+        let notified = self.notification.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if self.check().is_ok() {
-            self.notification.notified().await;
+            notified.await;
         }
     }
 }
@@ -148,43 +174,13 @@ struct Settings {
     settings_warning: Option<String>,
 }
 
-/// Remove the leading capture delay while retaining a short amount of context
-/// before speech. Audio is interleaved by channel.
-fn trim_leading_silence(
-    samples: &[i16],
-    channels: usize,
-    sample_rate: u32,
-) -> Result<Vec<i16>, String> {
-    if channels == 0 || sample_rate == 0 || samples.is_empty() {
-        return Err("未检测到有效音频".into());
-    }
-
-    let window_frames = (sample_rate / 100).max(1) as usize; // 10 ms
-    let total_frames = samples.len() / channels;
-    let threshold = 32768.0_f64 * 10_f64.powf(-42.0 / 20.0);
-    let mut first_active_window = None;
-    let window_count = (total_frames + window_frames - 1) / window_frames;
-
-    for window in 0..window_count.saturating_sub(1) {
-        let start_frame = window * window_frames;
-        let end_frame = ((window + 1) * window_frames).min(total_frames);
-        let next_start = end_frame;
-        let next_end = ((window + 2) * window_frames).min(total_frames);
-        if rms(samples, channels, start_frame, end_frame) > threshold
-            && rms(samples, channels, next_start, next_end) > threshold
-        {
-            first_active_window = Some(window);
-            break;
-        }
-    }
-
-    let speech_frame =
-        first_active_window.ok_or_else(|| "未检测到有效音频".to_string())? * window_frames;
-    let pre_roll_frames = (sample_rate / 10) as usize; // 100 ms
-    let start_frame = speech_frame
-        .saturating_sub(pre_roll_frames)
-        .min(total_frames);
-    Ok(samples[start_frame * channels..].to_vec())
+#[cfg(test)]
+fn trim_leading_silence(samples: &[i16], channels: usize, sample_rate: u32) -> Result<Vec<i16>, String> {
+    let mut audio = recording::Audio::new(sample_rate, channels as u16, recording::MAX_AUDIO_BYTES)?;
+    audio.push(samples.iter().copied());
+    let wav = audio.finish()?;
+    hound::WavReader::new(std::io::Cursor::new(wav)).map_err(|e| e.to_string())?
+        .samples::<i16>().collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 fn rms(samples: &[i16], channels: usize, start_frame: usize, end_frame: usize) -> f64 {
@@ -483,6 +479,31 @@ fn recording_path(id: u64) -> PathBuf {
     std::env::temp_dir().join(format!("open-typeless-{}-{}.wav", std::process::id(), id))
 }
 
+fn save_recording(run: &TranscriptionRun, path: &std::path::Path, data: Vec<u8>) -> Result<(), String> {
+    run.check()?;
+    if let Err(error) = recording::save(path, &data) {
+        *run.recording_bytes.lock().map_err(|e| e.to_string())? = Some(data);
+        run.warnings.lock().map_err(|e| e.to_string())?.push(format!("临时录音保存失败，继续识别: {error}"));
+    } else {
+        run.recording_saved.store(true, Ordering::SeqCst);
+    }
+    if let Err(error) = run.check() {
+        if run.recording_saved.load(Ordering::SeqCst) { let _ = std::fs::remove_file(path); }
+        run.recording_bytes.lock().map_err(|e| e.to_string())?.take();
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn cleanup_recording(path: &std::path::Path, keep: bool) -> Result<(), String> {
+    if keep { return Ok(()); }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(format!("临时录音清理失败: {}", path.display())),
+    }
+}
+
 fn finish_current_run(
     active: &mut Option<Arc<TranscriptionRun>>,
     id: u64,
@@ -551,7 +572,11 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
         tokio::select! {
             biased;
             _ = run.cancellation() => return Err(CANCELLED.into()),
-            result = check_backend(&run.backend.server_url, &run.backend.api_key) => result?,
+            result = backend_capabilities(&run.backend.server_url, &run.backend.api_key) => {
+                let (streaming, max_bytes) = result?;
+                run.streaming_enabled.store(streaming, Ordering::SeqCst);
+                run.max_audio_bytes.store(max_bytes, Ordering::SeqCst);
+            },
         }
         error_label = "录音失败";
         // Native shortcut registration must run on the UI thread. Never hold
@@ -609,7 +634,8 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
             let supported = device.default_input_config().map_err(|e| e.to_string())?;
             let sample_rate = supported.sample_rate().0;
             let channels = supported.channels();
-            let samples = Arc::new(Mutex::new(Vec::new()));
+            let samples = Arc::new(Mutex::new(recording::Audio::new(sample_rate, channels,
+                capture_run.max_audio_bytes.load(Ordering::SeqCst) as usize)?));
             let sink = samples.clone();
             let capture_ready_once = Arc::new(AtomicBool::new(false));
             let error_events = app.clone();
@@ -617,6 +643,7 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
             let err_fn = move |e| {
                 eprintln!("audio input error: {e}");
                 if error_run.check().is_ok() {
+                    *error_run.capture_error.lock().unwrap() = Some("麦克风中断，已结束录音".into());
                     let _ = error_events.emit("mic-state", "disconnected");
                 }
             };
@@ -642,7 +669,7 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
                                 let _ = ready.send(());
                                 let _ = events.emit("mic-state", "ready");
                             }
-                            sink.lock().unwrap().extend_from_slice(d)
+                            sink.lock().unwrap().push(d.iter().copied())
                         },
                         err_fn,
                         None,
@@ -674,7 +701,7 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
                             }
                             sink.lock()
                                 .unwrap()
-                                .extend(d.iter().map(|x| (*x as i32 - 32768) as i16))
+                                .push(d.iter().map(|x| (*x as i32 - 32768) as i16))
                         },
                         err_fn,
                         None,
@@ -702,7 +729,7 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
                             }
                             sink.lock()
                                 .unwrap()
-                                .extend(d.iter().map(|x| (x.clamp(-1.0, 1.0) * 32767.0) as i16))
+                                .push(d.iter().map(|x| (x.clamp(-1.0, 1.0) * 32767.0) as i16))
                         },
                         err_fn,
                         None,
@@ -724,29 +751,56 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
                 }
             }
             ready_tx.send(Ok(())).map_err(|e| e.to_string())?;
-            stop_rx.recv().map_err(|e| e.to_string())?;
-            // The input device can have one callback already queued when the
-            // user releases the hotkey/button. Keep the stream alive briefly
-            // so the tail of the utterance reaches `samples` before closing.
+            let mut upload = None;
+            let streaming = capture_run.streaming_enabled.load(Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(recording::MAX_RECORDING_SECONDS);
+            loop {
+                let (chunk, full) = {
+                    let mut captured = samples.lock().map_err(|e| e.to_string())?;
+                    (if streaming { captured.pending(false) } else { Vec::new() }, captured.full())
+                };
+                // Do not open an idle stream before speech; all transports share the same pre-roll.
+                if !chunk.is_empty() && streaming {
+                    upload.get_or_insert_with(|| streaming::start(capture_run.clone(), sample_rate, channels)).send(&chunk);
+                }
+                let capture_error = capture_run.capture_error.lock().map_err(|e| e.to_string())?.clone();
+                if full || Instant::now() >= deadline || capture_error.is_some() {
+                    capture_run.warnings.lock().unwrap().push(capture_error.unwrap_or_else(|| "已达到录音上限，自动结束本次录音".into()));
+                    let stop_app = app.clone();
+                    let stop_run = capture_run.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        // A delayed auto-stop must not stop a newer recording after cancellation.
+                        let _ = with_current_run(&stop_app.state::<AppState>().active, &stop_run, || {
+                            stop_app.emit_to("main", "stop-requested", ()).map_err(|e| e.to_string())
+                        });
+                    });
+                    break;
+                }
+                match stop_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(()) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            // Retain the queued microphone tail before publishing either transport's EOF.
             std::thread::sleep(Duration::from_millis(200));
             drop(stream);
             capture_run.check()?;
-            let captured = samples.lock().map_err(|e| e.to_string())?.clone();
-            let samples = trim_leading_silence(&captured, channels as usize, sample_rate)?;
-            let path = recording_path(capture_run.id);
-            let spec = hound::WavSpec {
-                channels,
-                sample_rate,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            };
-            let mut writer = hound::WavWriter::create(&path, spec).map_err(|e| e.to_string())?;
-            for sample in samples {
-                writer.write_sample(sample).map_err(|e| e.to_string())?;
+            let mut captured = std::mem::replace(
+                &mut *samples.lock().map_err(|e| e.to_string())?,
+                recording::Audio::new(sample_rate, channels, capture_run.max_audio_bytes.load(Ordering::SeqCst) as usize)?,
+            );
+            let tail = if streaming { captured.pending(true) } else { Vec::new() };
+            if !tail.is_empty() && streaming {
+                upload.get_or_insert_with(|| streaming::start(capture_run.clone(), sample_rate, channels)).send(&tail);
             }
-            writer.finalize().map_err(|e| e.to_string())?;
+            let data = captured.finish()?;
+            drop(upload);
+            let path = recording_path(capture_run.id);
+            save_recording(&capture_run, &path, data)?;
             if capture_run.check().is_err() || done_tx.send(Ok(path.clone())).is_err() {
-                let _ = std::fs::remove_file(path);
+                if capture_run.recording_saved.load(Ordering::SeqCst) { let _ = std::fs::remove_file(path); }
+                capture_run.recording_bytes.lock().unwrap().take();
                 return Err(CANCELLED.into());
             }
             Ok(())
@@ -890,7 +944,8 @@ fn cancel_active(app: &AppHandle) -> Result<(), String> {
         {
             recorder.take();
         }
-        let _ = std::fs::remove_file(recording_path(run.id));
+        if run.recording_saved.load(Ordering::SeqCst) { let _ = std::fs::remove_file(recording_path(run.id)); }
+        run.recording_bytes.lock().map_err(|e| e.to_string())?.take();
     }
     hide_pill(app);
     app.emit("recording-cancelled", ())
@@ -927,6 +982,19 @@ fn read_test_request(socket: &mut std::net::TcpStream) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::trim_leading_silence;
+
+    #[test]
+    fn stopping_after_automatic_capture_completion_still_returns_the_recording() {
+        use super::*;
+        for outcome in [Ok(PathBuf::from("completed.wav")), Err("capture failed".into())] {
+            let (stop, stopped) = mpsc::channel();
+            let (done, result) = mpsc::channel();
+            drop(stopped);
+            done.send(outcome.clone()).unwrap();
+            let session = RecordingSession { run: Arc::new(TranscriptionRun::new(1)), stop, done: result };
+            assert_eq!(session.finish(), outcome);
+        }
+    }
 
     #[test]
     fn failed_runs_show_errors_but_cancelled_or_superseded_runs_do_not() {
@@ -1149,13 +1217,7 @@ async fn stop_recording(app: AppHandle) -> Result<RecordingFile, String> {
     run.check()?;
     app.emit("recording-processing", ())
         .map_err(|e| e.to_string())?;
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        session.stop.send(()).map_err(|e| e.to_string())?;
-        session
-            .done
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|e| e.to_string())?
-    })
+    let result = tauri::async_runtime::spawn_blocking(move || session.finish())
     .await
     .map_err(|e| e.to_string())
     .flatten();
@@ -1165,8 +1227,8 @@ async fn stop_recording(app: AppHandle) -> Result<RecordingFile, String> {
             run_id: run.id,
         }),
         other => {
-            if let Ok(path) = &other {
-                let _ = std::fs::remove_file(path);
+            if run.recording_saved.load(Ordering::SeqCst) {
+                if let Ok(path) = &other { let _ = std::fs::remove_file(path); }
             }
             let error = other.err().unwrap_or_else(|| CANCELLED.into());
             finish_run(&app, run.id, Some(PillError::new("录音失败", &error))).await;
@@ -1177,6 +1239,10 @@ async fn stop_recording(app: AppHandle) -> Result<RecordingFile, String> {
 
 async fn recognize(url: String, path: &str, hotwords: &str, api_key: &str) -> Result<Recognition, String> {
     let data = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
+    recognize_audio(url, data, hotwords, api_key).await
+}
+
+async fn recognize_audio(url: String, data: Vec<u8>, hotwords: &str, api_key: &str) -> Result<Recognition, String> {
     let part = reqwest::multipart::Part::bytes(data)
         .file_name("recording.wav")
         .mime_str("audio/wav")
@@ -1185,7 +1251,7 @@ async fn recognize(url: String, path: &str, hotwords: &str, api_key: &str) -> Re
         .part("audio", part)
         .text("language", "auto")
         .text("hotwords", hotwords.to_owned());
-    let request = backend_client()?.post(url).multipart(form);
+    let request = backend_client()?.post(url).multipart(form).timeout(Duration::from_secs(60));
     let response = authorize(request, api_key)
         .send()
         .await
@@ -1205,7 +1271,22 @@ async fn recognize_for_run(
     tokio::select! {
         biased;
         _ = run.cancellation() => Err(CANCELLED.into()),
-        result = recognize(url, path, &run.hotwords, &run.backend.api_key) => result,
+        result = async {
+            let streaming = run.streaming_result.lock().map_err(|e| e.to_string())?.take();
+            if let Some(result) = streaming {
+                if let Ok(Ok(Ok(recognition))) = tokio::time::timeout(Duration::from_secs(60), result).await {
+                    run.check()?;
+                    return Ok(recognition);
+                }
+                run.check()?;
+            }
+            let memory = run.recording_bytes.lock().map_err(|e| e.to_string())?.clone();
+            if let Some(data) = memory {
+                recognize_audio(url, data, &run.hotwords, &run.backend.api_key).await
+            } else {
+                recognize(url, path, &run.hotwords, &run.backend.api_key).await
+            }
+        } => result,
     }
 }
 
@@ -1224,13 +1305,14 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<Transcri
         .cloned()
         .ok_or(CANCELLED)?;
     run.begin_transcription()?;
-    let result = async {
+    let mut keep_recording = false;
+    let result: Result<TranscriptionOutcome, String> = async {
         run.check()?;
         let url = recognition_url(&run.backend.server_url)?;
         let recognition = recognize_for_run(&run, url, &file.path).await?;
         run.check()?;
         if recognition.raw_text.trim().is_empty() {
-            return Ok(TranscriptionOutcome { text: String::new(), warnings: Vec::new() });
+            return Ok(TranscriptionOutcome { text: String::new(), warnings: run.warnings.lock().map_err(|e| e.to_string())?.clone() });
         }
         // Accepting a result and cancellation share the active-run lock. Once
         // accepted, hide the cancel UI and finish archiving/pasting this run.
@@ -1249,12 +1331,23 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<Transcri
         let text = recognition.output_text().to_owned();
         let stamp = run.stamp.clone();
         let path = PathBuf::from(&file.path);
-        let mut warnings = Vec::new();
+        let mut warnings = run.warnings.lock().map_err(|e| e.to_string())?.clone();
+        let memory = run.recording_bytes.lock().map_err(|e| e.to_string())?.take();
         match with_history(app.clone(), move |store| {
-            store.save(&stamp, &path, &recognition.raw_text, recognition.polished_text.as_deref())
+            if let Some(data) = memory {
+                store.save_bytes(&stamp, &data, &recognition.raw_text, recognition.polished_text.as_deref())
+            } else {
+                store.save(&stamp, &path, &recognition.raw_text, recognition.polished_text.as_deref())
+            }
         }).await {
             Ok(()) => { let _ = app.emit("history-changed", ()); }
-            Err(error) => warnings.push(format!("识别成功，但本地历史保存失败: {error}")),
+            Err(error) => {
+                keep_recording = true;
+                warnings.push(format!("识别成功，但本地历史保存失败: {error}"));
+                if run.recording_saved.load(Ordering::SeqCst) {
+                    warnings.push(format!("录音已保留，可手动恢复: {}", file.path));
+                }
+            },
         };
         let output = text.clone();
         let paste_app = app.clone();
@@ -1299,7 +1392,21 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<Transcri
         Ok(TranscriptionOutcome { text: output, warnings })
     }
     .await;
-    let _ = tokio::fs::remove_file(&file.path).await;
+    let mut result = result;
+    run.recording_bytes.lock().map_err(|e| e.to_string())?.take();
+    if result.is_err() && run.check().is_ok() && run.recording_saved.load(Ordering::SeqCst) {
+        keep_recording = true;
+        if let Err(error) = &mut result { error.push_str(&format!("; 录音已保留，可手动恢复: {}", file.path)); }
+    }
+    let cleanup = if run.recording_saved.load(Ordering::SeqCst) {
+        cleanup_recording(std::path::Path::new(&file.path), keep_recording && run.check().is_ok())
+    } else { Ok(()) };
+    if let Err(error) = cleanup {
+        match &mut result {
+            Ok(outcome) => outcome.warnings.push(error),
+            Err(message) => { message.push_str("; "); message.push_str(&error); }
+        }
+    }
     let error = match &result {
         Err(error) => Some(PillError::new("识别失败", error)),
         Ok(outcome) if !outcome.warnings.is_empty() => {
@@ -1367,6 +1474,10 @@ fn recognition_url(base: &str) -> Result<String, String> {
 }
 
 async fn check_backend(base: &str, api_key: &str) -> Result<(), String> {
+    backend_capabilities(base, api_key).await.map(|_| ())
+}
+
+async fn backend_capabilities(base: &str, api_key: &str) -> Result<(bool, u64), String> {
     let base = normalize_server_url(base)?;
     if base.is_empty() {
         return Err("后端地址未设置".into());
@@ -1381,7 +1492,9 @@ async fn check_backend(base: &str, api_key: &str) -> Result<(), String> {
     if body.get("status").and_then(|status| status.as_str()) != Some("ok") {
         return Err("后端健康检查未通过".into());
     }
-    Ok(())
+    Ok((body.pointer("/capabilities/streaming_asr").and_then(|value| value.as_bool()) == Some(true),
+        body.pointer("/limits/max_audio_bytes").and_then(|value| value.as_u64())
+            .unwrap_or(recording::MAX_AUDIO_BYTES as u64).min(recording::MAX_AUDIO_BYTES as u64)))
 }
 
 #[tauri::command]

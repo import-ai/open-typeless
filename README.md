@@ -38,9 +38,11 @@ Your backend address, API key, and shortcut are saved automatically. Recording i
 3. Speak, then press and release the same key again to finish.
 4. Wait for recognition to complete. The text is pasted into the app.
 
+The app checks whether your backend supports streaming ASR and uses it automatically when available, sending audio while you speak. Otherwise, it uploads the completed recording as before. If a stream fails, the app retries with the complete recording. Text is polished and pasted once, after you stop recording. Recording stops automatically at the service’s audio size limit (up to 12 MiB) or four minutes, whichever comes first, and shows a warning.
+
 Press **Esc** while recording or waiting for recognition to cancel. You can drag the floating recording indicator to a convenient position; it stays there until you quit the app.
 
-If recording or recognition fails, the floating indicator turns red and shows an error. Hover over it for details, then press **Esc** or click its close button to dismiss it. Check the backend settings if it reports a missing or unavailable backend.
+If recording or recognition fails, the floating indicator turns red and shows an error. If a recording was saved but recognition or history storage failed, the message includes its location for manual recovery. Hover over it for details, then press **Esc** or click its close button to dismiss it. Check the backend settings if it reports a missing or unavailable backend.
 
 To change the shortcut, click the shortcut field in settings, press your preferred key or key combination, then release it to save. Click elsewhere to cancel shortcut capture.
 

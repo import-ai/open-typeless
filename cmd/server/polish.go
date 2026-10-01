@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -165,4 +166,18 @@ func (p *polisher) polish(parent context.Context, raw string) (string, error) {
 		return "", errors.New("LLM did not return a complete text result")
 	}
 	return text, nil
+}
+
+// Both transports polish only the complete transcript and retain the ASR text.
+func (s *server) polishRecognition(ctx context.Context, raw, language string, durationMS int) recognitionResponse {
+	result := recognitionResponse{RawText: raw, PolishedText: raw, Language: language, DurationMS: durationMS}
+	if s.polisher != nil && strings.TrimSpace(raw) != "" && ctx.Err() == nil {
+		text, err := s.polisher.polish(ctx, raw)
+		if err == nil {
+			result.PolishedText = text
+		} else if ctx.Err() == nil {
+			log.Printf("polishing failed; returning raw transcript: %v", err)
+		}
+	}
+	return result
 }
