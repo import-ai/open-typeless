@@ -16,7 +16,9 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{image::Image, AppHandle, Emitter, Manager, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 struct RecordingSession {
@@ -40,11 +42,17 @@ struct AppState {
     shortcut_capturing: Mutex<bool>,
     settings_warning: Mutex<Option<String>>,
     dictionary_lock: Mutex<()>,
+    presence: Mutex<PresenceSettings>,
 }
 #[derive(Clone, Default)]
 struct BackendSettings {
     server_url: String,
     api_key: String,
+}
+#[derive(Clone, Copy, Default)]
+struct PresenceSettings {
+    tray_visible: bool,
+    dock_visible: bool,
 }
 
 const CANCELLED: &str = "已取消本次识别";
@@ -172,6 +180,8 @@ struct Settings {
     shortcut_warning: Option<String>,
     developer_options: bool,
     settings_warning: Option<String>,
+    tray_visible: bool,
+    dock_visible: bool,
 }
 
 #[cfg(test)]
@@ -197,6 +207,88 @@ fn rms(samples: &[i16], channels: usize, start_frame: usize, end_frame: usize) -
     (sum / (end - start) as f64).sqrt()
 }
 
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn core_tray_image(icon: &Image<'_>) -> Image<'static> {
+    let width = icon.width() as usize;
+    let height = icon.height() as usize;
+    let source = icon.rgba();
+    let mut bounds: Option<(usize, usize, usize, usize)> = None;
+    for (index, pixel) in source.chunks_exact(4).enumerate() {
+        if pixel[0] >= 180 && pixel[1] >= 180 && pixel[2] >= 180 {
+            let x = index % width;
+            let y = index / width;
+            bounds = Some(match bounds {
+                Some((left, top, right, bottom)) => (left.min(x), top.min(y), right.max(x), bottom.max(y)),
+                None => (x, y, x, y),
+            });
+        }
+    }
+    let (min_x, min_y, max_x, max_y) = bounds.unwrap_or((0, 0, width - 1, height - 1));
+    let padding = 4;
+    let left = min_x.saturating_sub(padding);
+    let top = min_y.saturating_sub(padding);
+    let right = (max_x + padding).min(width - 1);
+    let bottom = (max_y + padding).min(height - 1);
+    let cropped_width = right - left + 1;
+    let cropped_height = bottom - top + 1;
+    let mut rgba = Vec::with_capacity(cropped_width * cropped_height * 4);
+    for y in top..=bottom {
+        for x in left..=right {
+            let pixel = &source[(y * width + x) * 4..][..4];
+            let white = pixel[0] >= 180 && pixel[1] >= 180 && pixel[2] >= 180;
+            if white {
+                rgba.extend_from_slice(&[255, 255, 255, pixel[3]]);
+            } else {
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+    }
+    Image::new_owned(rgba, cropped_width as u32, cropped_height as u32)
+}
+
+fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let show = MenuItem::with_id(app, "show-main", "打开主窗口", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出应用", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let icon = core_tray_image(app.default_window_icon().ok_or("缺少应用图标")?);
+    TrayIconBuilder::with_id("main-tray")
+        .icon(icon)
+        .icon_as_template(true)
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show-main" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                show_main_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+fn apply_presence(app: &AppHandle) -> Result<(), String> {
+    let settings = *app.state::<AppState>().presence.lock().map_err(|e| e.to_string())?;
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        tray.set_visible(settings.tray_visible).map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    app.set_dock_visibility(settings.dock_visible).map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    if let Some(window) = app.get_webview_window("main") {
+        window.set_skip_taskbar(!settings.dock_visible).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -209,6 +301,7 @@ fn main() {
             shortcut_capturing: Mutex::new(false),
             settings_warning: Mutex::new(None),
             dictionary_lock: Mutex::new(()),
+            presence: Mutex::new(PresenceSettings { tray_visible: true, dock_visible: true }),
         })
         .setup(|app| {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -217,14 +310,27 @@ fn main() {
             }
             restore_settings(app.handle())?;
             app.manage(HistoryState::new(config_directory(app.handle()).and_then(|path| history::Store::open(&path))));
+            setup_tray(app)?;
+            apply_presence(app.handle())?;
             position_pill(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = window.hide();
+                    let keep_running = window
+                        .app_handle()
+                        .state::<AppState>()
+                        .presence
+                        .lock()
+                        .map(|settings| settings.tray_visible || settings.dock_visible)
+                        .unwrap_or(true);
+                    if keep_running {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    } else {
+                        window.app_handle().exit(0);
+                    }
                     return;
                 }
             }
@@ -244,6 +350,7 @@ fn main() {
             debug_pill_preview,
             transcribe_file,
             set_backend_settings,
+            set_presence_settings,
             check_server_connection,
             get_settings,
             get_dictionary,
@@ -414,18 +521,29 @@ fn restore_settings(app: &AppHandle) -> Result<(), String> {
         server_url: saved.server_url,
         api_key: saved.api_key,
     };
+    *state.presence.lock().map_err(|e| e.to_string())? = PresenceSettings {
+        tray_visible: saved.tray_visible,
+        dock_visible: saved.dock_visible,
+    };
     *state.settings_warning.lock().map_err(|e| e.to_string())? =
         (!warnings.is_empty()).then(|| warnings.join("；"));
     Ok(())
 }
 
-fn persist_settings(app: &AppHandle, shortcut: &str, backend: &BackendSettings) -> Result<(), String> {
+fn persist_settings(
+    app: &AppHandle,
+    shortcut: &str,
+    backend: &BackendSettings,
+    presence: PresenceSettings,
+) -> Result<(), String> {
     settings_file::save(
         &settings_path(app)?,
         &settings_file::SavedSettings {
             shortcut: shortcut.into(),
             server_url: backend.server_url.clone(),
             api_key: backend.api_key.clone(),
+            tray_visible: presence.tray_visible,
+            dock_visible: presence.dock_visible,
         },
     )
 }
@@ -994,7 +1112,21 @@ fn read_test_request(socket: &mut std::net::TcpStream) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::trim_leading_silence;
+    use super::{core_tray_image, trim_leading_silence};
+
+    #[test]
+    fn tray_icon_crops_transparent_margins_around_white_core() {
+        let mut rgba = vec![0; 20 * 20 * 4];
+        for y in 7..=12 {
+            for x in 8..=11 {
+                rgba[(y * 20 + x) * 4..][..4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        let cropped = core_tray_image(&tauri::image::Image::new(&rgba, 20, 20));
+        assert_eq!((cropped.width(), cropped.height()), (12, 14));
+        assert_eq!(&cropped.rgba()[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&cropped.rgba()[(6 * 12 + 4) * 4..][..4], &[255, 255, 255, 255]);
+    }
 
     #[test]
     fn stopping_after_automatic_capture_completion_still_returns_the_recording() {
@@ -1633,10 +1765,26 @@ fn set_backend_settings(app: AppHandle, state: State<'_, AppState>, url: String,
     // complete URL/key pair before making either value visible to requests.
     let shortcut = state.shortcut.lock().map_err(|e| e.to_string())?;
     let mut backend = state.backend.lock().map_err(|e| e.to_string())?;
-    persist_settings(&app, &shortcut, &next)?;
+    let presence = *state.presence.lock().map_err(|e| e.to_string())?;
+    persist_settings(&app, &shortcut, &next, presence)?;
     *backend = next;
     *state.settings_warning.lock().map_err(|e| e.to_string())? = None;
     Ok(())
+}
+
+#[tauri::command]
+fn set_presence_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tray_visible: bool,
+    dock_visible: bool,
+) -> Result<(), String> {
+    let shortcut = state.shortcut.lock().map_err(|e| e.to_string())?;
+    let backend = state.backend.lock().map_err(|e| e.to_string())?;
+    let next = PresenceSettings { tray_visible, dock_visible };
+    persist_settings(&app, &shortcut, &backend, next)?;
+    *state.presence.lock().map_err(|e| e.to_string())? = next;
+    apply_presence(&app)
 }
 
 #[tauri::command]
@@ -1655,6 +1803,7 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
         shortcut_warning
     };
     let backend = state.backend.lock().map_err(|e| e.to_string())?.clone();
+    let presence = *state.presence.lock().map_err(|e| e.to_string())?;
     Ok(Settings {
         settings_warning,
         developer_options: developer_options_enabled(),
@@ -1662,6 +1811,8 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
         shortcut,
         server_url: backend.server_url,
         api_key: backend.api_key,
+        tray_visible: presence.tray_visible,
+        dock_visible: presence.dock_visible,
     })
 }
 
@@ -1711,8 +1862,9 @@ fn set_shortcut(
         return Err("请先完成快捷键录入".into());
     }
     let backend = state.backend.lock().map_err(|e| e.to_string())?;
+    let presence = *state.presence.lock().map_err(|e| e.to_string())?;
     if *current == shortcut {
-        persist_settings(&app, &shortcut, &backend)?;
+        persist_settings(&app, &shortcut, &backend, presence)?;
         *state.settings_warning.lock().map_err(|e| e.to_string())? = None;
         return Ok(());
     }
@@ -1721,7 +1873,7 @@ fn set_shortcut(
         let _ = bind_named_shortcut(&app, &current);
         return Err(error);
     }
-    if let Err(error) = persist_settings(&app, &shortcut, &backend) {
+    if let Err(error) = persist_settings(&app, &shortcut, &backend, presence) {
         let _ = unbind_named_shortcut(&app, &shortcut);
         if let Err(restore_error) = bind_named_shortcut(&app, &current) {
             return Err(format!("{error}；恢复原快捷键失败: {restore_error}"));

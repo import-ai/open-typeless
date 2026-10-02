@@ -7,6 +7,8 @@ pub struct SavedSettings {
     pub shortcut: String,
     pub server_url: String,
     pub api_key: String,
+    pub tray_visible: bool,
+    pub dock_visible: bool,
 }
 
 impl Default for SavedSettings {
@@ -15,6 +17,8 @@ impl Default for SavedSettings {
             shortcut: crate::default_shortcut_name().into(),
             server_url: String::new(),
             api_key: String::new(),
+            tray_visible: true,
+            dock_visible: true,
         }
     }
 }
@@ -55,6 +59,8 @@ mod tests {
             shortcut: "Control+Shift+K".into(),
             server_url: "http://localhost:8080/api/v1".into(),
             api_key: "test-key".into(),
+            tray_visible: true,
+            dock_visible: false,
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);
