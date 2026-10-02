@@ -17,7 +17,7 @@ export const windowLabel = desktop
   : new URLSearchParams(location.search).get('view') ?? 'main'
 
 export interface RecordingFile { path: string; run_id: number }
-export interface Settings { shortcut: string; server_url: string; api_key: string; shortcut_warning: string | null; settings_warning: string | null; developer_options: boolean }
+export interface Settings { shortcut: string; server_url: string; api_key: string; shortcut_warning: string | null; settings_warning: string | null; developer_options: boolean; tray_visible: boolean; dock_visible: boolean }
 export const commands = {
   history: async (cursor?: HistoryCursor) => desktop ? invoke<HistoryPage>('get_history_page', { cursor: cursor ?? null }) : previewHistory(),
   insights: async () => desktop ? invoke<Insights>('get_insights') : previewInsights(),
@@ -38,6 +38,7 @@ export const commands = {
     if (!response.ok || (await response.json()).status !== 'ok') throw new Error('后端健康检查未通过')
   },
   backendSettings: (url: string, apiKey: string) => invoke<void>('set_backend_settings', { url, apiKey }),
+  presenceSettings: (trayVisible: boolean, dockVisible: boolean) => invoke<void>('set_presence_settings', { trayVisible, dockVisible }),
   settings: () => invoke<Settings>('get_settings'),
   start: () => invoke<void>('start_recording'),
   stop: () => invoke<RecordingFile>('stop_recording'),

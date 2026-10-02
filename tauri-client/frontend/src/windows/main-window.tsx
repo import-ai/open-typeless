@@ -8,6 +8,7 @@ import { DeveloperOptions } from '@/components/developer-options'
 import { ShortcutKeys } from '@/components/shortcut-keys'
 import { Kbd } from '@/components/ui/kbd'
 import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ShortcutRecorder } from '@/components/shortcut-recorder'
 import { BackendSettingsFields } from '@/components/backend-settings-fields'
@@ -40,6 +41,8 @@ export function MainWindow() {
   const [settingsWarning, setSettingsWarning] = useState('')
   const [savingServer, setSavingServer] = useState(false)
   const [developerOptions, setDeveloperOptions] = useState(false)
+  const [trayVisible, setTrayVisible] = useState(true)
+  const [dockVisible, setDockVisible] = useState(true)
   const [capturingShortcut, setCapturingShortcut] = useState(false)
   const capturingShortcutRef = useRef(false)
   const dictionaryInputActive = useRef(false)
@@ -61,6 +64,8 @@ export function MainWindow() {
       setConfiguredApiKey(settings.api_key)
       setConfiguredServerUrl(settings.server_url)
       setDeveloperOptions(settings.developer_options)
+      setTrayVisible(settings.tray_visible)
+      setDockVisible(settings.dock_visible)
       setLoaded(true)
       setSettingsWarning(settings.settings_warning ?? settings.shortcut_warning ?? '')
     }).catch(error => { if (active) setStatus(String(error)) })
@@ -201,6 +206,27 @@ export function MainWindow() {
     finally { savingBackend.current = false; setSavingServer(false) }
   }
 
+  async function savePresence(tray: boolean, dock: boolean) {
+    if (!desktop) {
+      setTrayVisible(tray)
+      setDockVisible(dock)
+      return
+    }
+    try {
+      await commands.presenceSettings(tray, dock)
+      setTrayVisible(tray)
+      setDockVisible(dock)
+    } catch (error) { setStatus(String(error)) }
+  }
+
+  const presenceHelp = !trayVisible && !dockVisible
+    ? '关闭主窗口后，应用将退出。'
+    : trayVisible && dockVisible
+      ? '应用会同时保留在通知栏和 Dock 中；关闭主窗口后，可从任一入口重新打开。'
+      : trayVisible
+        ? '应用会保留在通知栏中；关闭主窗口后，可从通知栏重新打开。'
+        : '应用会保留在 Dock 中；关闭主窗口后，可从 Dock 重新打开。'
+
   return <main className="mx-auto flex max-w-xl flex-col gap-5 p-6">
     <header>
       <h1 className="text-xl font-semibold tracking-tight">Open Typeless</h1>
@@ -264,6 +290,18 @@ export function MainWindow() {
         onSave={() => { void saveBackend() }}
         onInputActiveChange={onBackendInputActiveChange}
       />
+      <section className="space-y-3" aria-labelledby="presence-label">
+        <h2 id="presence-label" className="text-sm font-medium">应用入口</h2>
+        <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
+          <label htmlFor="tray-visible"><span className="block text-sm">在通知栏显示图标</span><span className="block text-xs text-muted-foreground">应用运行时保留通知栏入口</span></label>
+          <Switch id="tray-visible" checked={trayVisible} disabled={(desktop && !loaded) || savingServer || capturingShortcut || phase !== 'idle'} onCheckedChange={value => { void savePresence(value, dockVisible) }} aria-label="在通知栏显示图标" />
+        </div>
+        <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
+          <label htmlFor="dock-visible"><span className="block text-sm">在 Dock 显示图标</span><span className="block text-xs text-muted-foreground">应用运行时保留 Dock 入口</span></label>
+          <Switch id="dock-visible" checked={dockVisible} disabled={(desktop && !loaded) || savingServer || capturingShortcut || phase !== 'idle'} onCheckedChange={value => { void savePresence(trayVisible, value) }} aria-label="在 Dock 显示图标" />
+        </div>
+        <p className="text-xs text-muted-foreground">{presenceHelp}</p>
+      </section>
       {settingsWarning && <p role="status" className="mt-3 text-xs text-destructive">{settingsWarning}</p>}
     </section>
     {developerOptions && <DeveloperOptions disabled={phase !== 'idle' || capturingShortcut} />}
