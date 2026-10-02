@@ -281,7 +281,24 @@ fn apply_presence(app: &AppHandle) -> Result<(), String> {
         tray.set_visible(settings.tray_visible).map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "macos")]
-    app.set_dock_visibility(settings.dock_visible).map_err(|e| e.to_string())?;
+    {
+        app.set_dock_visibility(settings.dock_visible).map_err(|e| e.to_string())?;
+        if !settings.dock_visible {
+            let retry = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1100));
+                let still_hidden = retry
+                    .state::<AppState>()
+                    .presence
+                    .lock()
+                    .map(|current| !current.dock_visible)
+                    .unwrap_or(false);
+                if still_hidden {
+                    let _ = retry.set_dock_visibility(false);
+                }
+            });
+        }
+    }
     #[cfg(not(target_os = "macos"))]
     if let Some(window) = app.get_webview_window("main") {
         window.set_skip_taskbar(!settings.dock_visible).map_err(|e| e.to_string())?;
