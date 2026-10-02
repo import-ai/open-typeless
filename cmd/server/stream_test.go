@@ -41,7 +41,7 @@ func TestStreamingAudioArrivesBeforeUploadEnds(t *testing.T) {
 		fmt.Fprint(w, "data: {\"type\":\"transcript.text.done\",\"text\":\"语音 OAuth\"}\n\ndata: [DONE]\n\n")
 	}))
 	defer upstream.Close()
-	s := &server{inferenceURL: upstream.URL, inferenceStreamModel: "live-model", client: upstream.Client(), maxBytes: 1024}
+	s := &server{inferenceURL: upstream.URL, inferenceStreamModel: "live-model", client: upstream.Client(), maxBytes: 1024, disableFileASR: true}
 	polishCalls := 0
 	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request polishRequest
@@ -133,11 +133,17 @@ func TestStreamCapabilityAndCancellation(t *testing.T) {
 		var body struct {
 			Capabilities struct {
 				Streaming bool `json:"streaming_asr"`
+				File      bool `json:"file_asr"`
 			} `json:"capabilities"`
 		}
-		if json.Unmarshal(w.Body.Bytes(), &body) != nil || body.Capabilities.Streaming != (model != "") {
+		if json.Unmarshal(w.Body.Bytes(), &body) != nil || body.Capabilities.Streaming != (model != "") || !body.Capabilities.File {
 			t.Fatal(w.Body.String())
 		}
+	}
+	w := httptest.NewRecorder()
+	(&server{inferenceStreamModel: "live", disableFileASR: true}).health(w, httptest.NewRequest("GET", "/", nil))
+	if !strings.Contains(w.Body.String(), `"streaming_asr":true`) || !strings.Contains(w.Body.String(), `"file_asr":false`) {
+		t.Fatal(w.Body.String())
 	}
 	started, stopped := make(chan struct{}), make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

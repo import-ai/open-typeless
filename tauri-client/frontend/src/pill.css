@@ -11,7 +11,41 @@ html[data-window="pill"] body, html[data-window="pill-debug"] body {
   display: grid;
   place-items: center;
 }
-.pill-shapes { position: relative; width: 128px; height: 32px; }
+.pill-stage.has-caption {
+  width: 360px;
+  height: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+}
+/* The native overlay grows with the caption. Anchor the capsule to the bottom. */
+html[data-window="pill"] .pill-stage,
+html[data-window="pill"] .pill-stage.has-caption {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+}
+.pill-caption {
+  box-sizing: border-box;
+  max-width: calc(100% - 16px);
+  height: 24px;
+  margin: 0 8px 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #000;
+  color: #fff;
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: none;
+}
+.pill-shapes { position: relative; width: 128px; height: 32px; flex: none; }
 .pill-shapes > .recording-pill { position: absolute; inset: 0; }
 .recording-pill {
   display: grid;

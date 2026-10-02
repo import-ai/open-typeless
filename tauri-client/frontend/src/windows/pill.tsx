@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { emitTo } from '@tauri-apps/api/event'
-import { RecordingPill } from '@/components/recording-pill'
+import { LiveCaption, RecordingPill } from '@/components/recording-pill'
 import { useTauriEvent } from '@/hooks/use-tauri-event'
 import { commands, desktop, previewPillError, type MicState, type PillError, type PillState } from '@/lib/desktop'
 
@@ -10,19 +10,29 @@ export function PillWindow() {
   const [level, setLevel] = useState(0)
   const [preview, setPreview] = useState(false)
   const [error, setError] = useState(previewPillError)
-  useTauriEvent<PillState>('pill-preview', (next) => { setPreview(true); setState(next); setError(previewPillError); setLevel(0.06) })
+  const [transcript, setTranscript] = useState('')
+  const stateRef = useRef(state)
+  stateRef.current = state
+  const clearTranscript = () => setTranscript('')
+  useTauriEvent<PillState>('pill-preview', (next) => { setPreview(true); setState(next); setError(previewPillError); setLevel(0.06); clearTranscript() })
   useEffect(() => {
     if (!preview || state !== 'ready') return
     const timer = setInterval(() => setLevel(0.04 + Math.random() * 0.04), 180)
     return () => clearInterval(timer)
   }, [preview, state])
-  useTauriEvent('pill-hidden', () => { setPreview(false); setState('disconnected'); setLevel(0) })
+  useTauriEvent('pill-hidden', () => { setPreview(false); setState('disconnected'); setLevel(0); clearTranscript() })
   useTauriEvent<MicState>('mic-state', next => setState(current => current === 'error' || current === 'processing' ? current : next))
-  useTauriEvent<PillError>('recording-error', next => { setPreview(false); setError(next); setState('error'); setLevel(0) })
+  useTauriEvent<PillError>('recording-error', next => { setPreview(false); setError(next); setState('error'); setLevel(0); clearTranscript() })
   useTauriEvent<number>('mic-level', setLevel)
-  useTauriEvent('recording-starting', () => { setPreview(false); setState('unready'); setLevel(0) })
-  useTauriEvent('recording-processing', () => setState('processing'))
-  useTauriEvent('recording-cancelled', () => setState('disconnected'))
+  useTauriEvent('recording-starting', () => { setPreview(false); setState('unready'); setLevel(0); clearTranscript() })
+  useTauriEvent('recording-processing', () => { setState('processing'); clearTranscript() })
+  useTauriEvent('recording-cancelled', () => { setState('disconnected'); clearTranscript() })
+  useTauriEvent<string>('asr-partial', (text) => {
+    if (!text) { setTranscript(''); return }
+    const current = stateRef.current
+    if (current === 'processing' || current === 'error') return
+    setTranscript(text)
+  })
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') { event.preventDefault(); void commands.cancel().catch(console.error) }
@@ -41,7 +51,9 @@ export function PillWindow() {
     }
     void emitTo('main', name).catch((error: unknown) => console.error(error))
   }
-  return <div className="pill-stage">
+  const caption = state === 'processing' || state === 'error' ? '' : transcript
+  return <div className={caption ? 'pill-stage has-caption' : 'pill-stage'}>
+    <LiveCaption text={caption} onDrag={drag} />
     <RecordingPill onDrag={drag} state={state} error={error} level={level} onCancel={() => request('cancel-requested')} onDone={() => request('stop-requested')} />
   </div>
 }

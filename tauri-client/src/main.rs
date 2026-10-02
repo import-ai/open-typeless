@@ -68,12 +68,16 @@ struct TranscriptionRun {
     notification: tokio::sync::Notify,
     capture_stop: Mutex<Option<mpsc::Sender<()>>>,
     streaming_enabled: AtomicBool,
+    // Older servers omit file_asr. Tests and those servers keep the WAV upload.
+    file_asr_enabled: AtomicBool,
     max_audio_bytes: AtomicU64,
     recording_bytes: Mutex<Option<Vec<u8>>>,
     recording_saved: AtomicBool,
     warnings: Mutex<Vec<String>>,
     capture_error: Mutex<Option<String>>,
     streaming_result: Mutex<Option<tokio::sync::oneshot::Receiver<Result<Recognition, String>>>>,
+    live_caption: AtomicBool,
+    live_partials: Mutex<Option<std::sync::mpsc::Sender<String>>>,
 }
 impl TranscriptionRun {
     fn new(id: u64) -> Self {
@@ -88,12 +92,15 @@ impl TranscriptionRun {
             notification: tokio::sync::Notify::new(),
             capture_stop: Mutex::new(None),
             streaming_enabled: AtomicBool::new(false),
+            file_asr_enabled: AtomicBool::new(true),
             max_audio_bytes: AtomicU64::new(recording::MAX_AUDIO_BYTES as u64),
             recording_bytes: Mutex::new(None),
             recording_saved: AtomicBool::new(false),
             warnings: Mutex::new(Vec::new()),
             capture_error: Mutex::new(None),
             streaming_result: Mutex::new(None),
+            live_caption: AtomicBool::new(false),
+            live_partials: Mutex::new(None),
         }
     }
     fn begin_transcription(&self) -> Result<(), String> {
@@ -662,6 +669,7 @@ fn finish_current_run(
         return;
     }
     let run = active.take().unwrap();
+    close_live_partials(&run);
     let error = error.filter(|_| run.check().is_ok());
     if error.is_some() {
         run.cancel();
@@ -677,6 +685,7 @@ async fn finish_run(app: &AppHandle, id: u64, error: Option<PillError>) {
             let state = finish_app.state::<AppState>();
             let mut active = state.active.lock().unwrap();
             finish_current_run(&mut active, id, error, |error| {
+                clear_live_caption(&finish_app);
                 if let Some(error) = error {
                     let _ = finish_app.emit_to("pill", "recording-error", error);
                     if let Err(error) = show_pill(&finish_app) {
@@ -721,9 +730,10 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
             biased;
             _ = run.cancellation() => return Err(CANCELLED.into()),
             result = backend_capabilities(&run.backend.server_url, &run.backend.api_key) => {
-                let (streaming, max_bytes) = result?;
-                run.streaming_enabled.store(streaming, Ordering::SeqCst);
-                run.max_audio_bytes.store(max_bytes, Ordering::SeqCst);
+                let capabilities = result?;
+                run.streaming_enabled.store(capabilities.streaming, Ordering::SeqCst);
+                run.file_asr_enabled.store(capabilities.file, Ordering::SeqCst);
+                run.max_audio_bytes.store(capabilities.max_audio_bytes, Ordering::SeqCst);
             },
         }
         error_label = "录音失败";
@@ -901,6 +911,17 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
             ready_tx.send(Ok(())).map_err(|e| e.to_string())?;
             let mut upload = None;
             let streaming = capture_run.streaming_enabled.load(Ordering::SeqCst);
+            let _live_caption = if streaming {
+                let (tx, rx) = std::sync::mpsc::channel();
+                *capture_run.live_partials.lock().map_err(|e| e.to_string())? = Some(tx);
+                capture_run.live_caption.store(true, Ordering::SeqCst);
+                let events = app.clone();
+                let caption_run = capture_run.clone();
+                std::thread::spawn(move || listen_live_caption(events, caption_run, rx));
+                Some(LiveCaptionGuard { run: capture_run.clone() })
+            } else {
+                None
+            };
             let deadline = Instant::now() + Duration::from_secs(recording::MAX_RECORDING_SECONDS);
             loop {
                 let (chunk, full) = {
@@ -971,6 +992,76 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
     Ok(())
 }
 
+struct LiveCaptionGuard {
+    run: Arc<TranscriptionRun>,
+}
+impl Drop for LiveCaptionGuard {
+    fn drop(&mut self) {
+        close_live_partials(&self.run);
+    }
+}
+
+fn close_live_partials(run: &TranscriptionRun) {
+    run.live_caption.store(false, Ordering::SeqCst);
+    if let Ok(mut partials) = run.live_partials.lock() {
+        partials.take();
+    }
+}
+
+const PILL_LOGICAL_WIDTH: f64 = 128.0;
+const PILL_LOGICAL_HEIGHT: f64 = 32.0;
+const CAPTION_LOGICAL_WIDTH: f64 = 360.0;
+const CAPTION_LOGICAL_HEIGHT: f64 = 64.0;
+
+fn set_pill_caption_frame(app: &AppHandle, caption: bool) {
+    let Some(window) = app.get_webview_window("pill") else { return };
+    let Ok(scale) = window.scale_factor() else { return };
+    let (width, height) = if caption {
+        (CAPTION_LOGICAL_WIDTH, CAPTION_LOGICAL_HEIGHT)
+    } else {
+        (PILL_LOGICAL_WIDTH, PILL_LOGICAL_HEIGHT)
+    };
+    let Ok(position) = window.outer_position() else { return };
+    let Ok(size) = window.outer_size() else { return };
+    let position = position.to_logical::<f64>(scale);
+    let size = size.to_logical::<f64>(scale);
+    if (size.width - width).abs() < 0.5 && (size.height - height).abs() < 0.5 {
+        return;
+    }
+    // Keep the capsule's bottom center fixed while the caption grows upward.
+    let center_x = position.x + size.width / 2.0;
+    let bottom = position.y + size.height;
+    let _ = window.set_size(tauri::LogicalSize::new(width, height));
+    let _ = window.set_position(tauri::LogicalPosition::new(center_x - width / 2.0, bottom - height));
+}
+
+fn clear_live_caption(app: &AppHandle) {
+    let _ = app.emit_to("pill", "asr-partial", "");
+    set_pill_caption_frame(app, false);
+}
+
+fn listen_live_caption(app: AppHandle, run: Arc<TranscriptionRun>, rx: std::sync::mpsc::Receiver<String>) {
+    let mut shown = false;
+    while let Ok(text) = rx.recv() {
+        if !run.live_caption.load(Ordering::SeqCst) {
+            continue;
+        }
+        let _ = app.emit_to("pill", "asr-partial", &text);
+        if shown {
+            continue;
+        }
+        set_pill_caption_frame(&app, true);
+        if run.live_caption.load(Ordering::SeqCst) {
+            shown = true;
+        } else {
+            set_pill_caption_frame(&app, false);
+        }
+    }
+    if shown {
+        set_pill_caption_frame(&app, false);
+    }
+}
+
 fn pill_position(origin: (i32, i32), size: (u32, u32), scale: f64) -> (i32, i32) {
     let width = (128.0 * scale).round() as i32;
     let height = (32.0 * scale).round() as i32;
@@ -1015,6 +1106,7 @@ fn show_pill(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 fn hide_pill(app: &AppHandle) {
+    clear_live_caption(app);
     if let Some(window) = app.get_webview_window("pill") {
         let _ = window.hide();
     }
@@ -1085,6 +1177,8 @@ fn cancel_active(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
     if let Some(run) = active.take() {
+        close_live_partials(&run);
+        clear_live_caption(app);
         let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
         if recorder
             .as_ref()
@@ -1377,6 +1471,8 @@ async fn stop_recording(app: AppHandle) -> Result<RecordingFile, String> {
         .ok_or("当前没有录音")?;
     let run = session.run.clone();
     run.check()?;
+    close_live_partials(&run);
+    clear_live_caption(&app);
     app.emit("recording-processing", ())
         .map_err(|e| e.to_string())?;
     let result = tauri::async_runtime::spawn_blocking(move || session.finish())
@@ -1436,11 +1532,33 @@ async fn recognize_for_run(
         result = async {
             let streaming = run.streaming_result.lock().map_err(|e| e.to_string())?.take();
             if let Some(result) = streaming {
-                if let Ok(Ok(Ok(recognition))) = tokio::time::timeout(Duration::from_secs(60), result).await {
-                    run.check()?;
-                    return Ok(recognition);
+                match tokio::time::timeout(Duration::from_secs(60), result).await {
+                    Ok(Ok(Ok(recognition))) => {
+                        run.check()?;
+                        return Ok(recognition);
+                    }
+                    Ok(Ok(Err(error))) => {
+                        run.check()?;
+                        if !run.file_asr_enabled.load(Ordering::SeqCst) {
+                            return Err(error);
+                        }
+                    }
+                    Ok(Err(_)) => {
+                        run.check()?;
+                        if !run.file_asr_enabled.load(Ordering::SeqCst) {
+                            return Err("流式识别未完成".into());
+                        }
+                    }
+                    Err(_) => {
+                        run.check()?;
+                        if !run.file_asr_enabled.load(Ordering::SeqCst) {
+                            return Err("流式识别超时".into());
+                        }
+                    }
                 }
+            } else if !run.file_asr_enabled.load(Ordering::SeqCst) {
                 run.check()?;
+                return Err("没有识别到语音".into());
             }
             let memory = run.recording_bytes.lock().map_err(|e| e.to_string())?.clone();
             if let Some(data) = memory {
@@ -1635,11 +1753,17 @@ fn recognition_url(base: &str) -> Result<String, String> {
     Ok(format!("{base}/recognitions"))
 }
 
+struct BackendCapabilities {
+    streaming: bool,
+    file: bool,
+    max_audio_bytes: u64,
+}
+
 async fn check_backend(base: &str, api_key: &str) -> Result<(), String> {
     backend_capabilities(base, api_key).await.map(|_| ())
 }
 
-async fn backend_capabilities(base: &str, api_key: &str) -> Result<(bool, u64), String> {
+async fn backend_capabilities(base: &str, api_key: &str) -> Result<BackendCapabilities, String> {
     let base = normalize_server_url(base)?;
     if base.is_empty() {
         return Err("后端地址未设置".into());
@@ -1654,9 +1778,18 @@ async fn backend_capabilities(base: &str, api_key: &str) -> Result<(bool, u64), 
     if body.get("status").and_then(|status| status.as_str()) != Some("ok") {
         return Err("后端健康检查未通过".into());
     }
-    Ok((body.pointer("/capabilities/streaming_asr").and_then(|value| value.as_bool()) == Some(true),
-        body.pointer("/limits/max_audio_bytes").and_then(|value| value.as_u64())
-            .unwrap_or(recording::MAX_AUDIO_BYTES as u64).min(recording::MAX_AUDIO_BYTES as u64)))
+    let streaming = body.pointer("/capabilities/streaming_asr").and_then(|value| value.as_bool()) == Some(true);
+    // Servers that predate file_asr always accepted the multipart upload.
+    let file = body.pointer("/capabilities/file_asr").and_then(|value| value.as_bool()).unwrap_or(true);
+    if !streaming && !file {
+        return Err("后端未启用语音识别".into());
+    }
+    Ok(BackendCapabilities {
+        streaming,
+        file,
+        max_audio_bytes: body.pointer("/limits/max_audio_bytes").and_then(|value| value.as_u64())
+            .unwrap_or(recording::MAX_AUDIO_BYTES as u64).min(recording::MAX_AUDIO_BYTES as u64),
+    })
 }
 
 #[tauri::command]

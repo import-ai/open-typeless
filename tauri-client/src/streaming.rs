@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 // A slow connection must never block the capture thread or drop audio silently.
-// On overflow abort this stream; the complete local WAV remains the fallback.
+// On overflow abort this stream. The complete local WAV is the fallback when file ASR is enabled.
 pub(super) struct Upload {
     sender: mpsc::Sender<Vec<u8>>,
     abort: tokio::task::AbortHandle,
@@ -57,6 +57,8 @@ pub(super) fn start(run: Arc<TranscriptionRun>, sample_rate: u32, channels: u16)
 struct Event {
     #[serde(rename = "type")]
     kind: String,
+    #[serde(default)]
+    text: String,
     result: Option<Recognition>,
 }
 
@@ -74,6 +76,8 @@ async fn recognize(
     metadata.push(b'\n');
     let finished = Arc::new(AtomicBool::new(false));
     let uploaded = finished.clone();
+    let partials = run.live_partials.lock().map_err(|e| e.to_string())?.clone();
+    let mut transcript = String::new();
     let body = futures_util::stream::unfold(
         (Some(metadata), receiver),
         move |(metadata, mut receiver)| {
@@ -126,7 +130,15 @@ async fn recognize(
                 serde_json::from_slice(&pending[..end]).map_err(|_| "流式识别响应无效")?;
             pending.drain(..=end);
             match event.kind.as_str() {
-                "ready" | "partial" => (),
+                "ready" => {}
+                "partial" if run.check().is_ok() && !event.text.is_empty() => {
+                    // partial.text is a delta. The pill shows the accumulated transcript.
+                    transcript.push_str(&event.text);
+                    if let Some(partials) = &partials {
+                        let _ = partials.send(transcript.clone());
+                    }
+                }
+                "partial" => {}
                 "final" if finished.load(Ordering::SeqCst) => {
                     return event.result.ok_or_else(|| "流式识别缺少最终结果".into())
                 }
@@ -455,6 +467,8 @@ mod tests {
         run.backend.api_key = "stream-key".into();
         run.hotwords = "OAuth\n语音".into();
         let run = Arc::new(run);
+        let (live_tx, live_rx) = std::sync::mpsc::channel();
+        *run.live_partials.lock().unwrap() = Some(live_tx);
         let (partial_tx, partial_rx) = oneshot::channel();
         let server = std::thread::spawn(move || {
             let mut socket = accept(&listener);
@@ -472,7 +486,7 @@ mod tests {
             socket.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").unwrap();
             emit(
                 &mut socket,
-                b"{\"type\":\"ready\"}\n{\"type\":\"partial\",\"text\":\"half\"}\n",
+                "{\"type\":\"ready\"}\n{\"type\":\"partial\",\"text\":\"半\"}\n{\"type\":\"partial\",\"text\":\"句\"}\n".as_bytes(),
             );
             partial_tx.send(()).unwrap();
             assert_eq!(chunk(&mut socket), vec![2, 0, 254, 255]);
@@ -490,6 +504,16 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let mut seen = String::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while seen != "半句" && std::time::Instant::now() < deadline {
+            match live_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(text) => seen = text,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(error) => panic!("{error}"),
+            }
+        }
+        assert_eq!(seen, "半句");
         upload.send(&[2, -2]);
         drop(upload);
         let result =
@@ -611,6 +635,8 @@ mod tests {
             ("", false),
             (r#", "capabilities":{"streaming_asr":false}"#, false),
             (r#", "capabilities":{"streaming_asr":true}"#, true),
+            (r#", "capabilities":{"streaming_asr":true,"file_asr":false}"#, true),
+            (r#", "capabilities":{"streaming_asr":false,"file_asr":true}"#, false),
             (r#", "limits":{"max_audio_bytes":2048}"#, false),
         ] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -626,10 +652,11 @@ mod tests {
                 )
                 .unwrap();
             });
-            let (streaming, max_bytes) = crate::backend_capabilities(&url, "").await.unwrap();
-            assert_eq!(streaming, expected);
+            let capabilities_body = crate::backend_capabilities(&url, "").await.unwrap();
+            assert_eq!(capabilities_body.streaming, expected);
+            assert_eq!(capabilities_body.file, !capabilities.contains("\"file_asr\":false"));
             assert_eq!(
-                max_bytes,
+                capabilities_body.max_audio_bytes,
                 if capabilities.contains("2048") {
                     2048
                 } else {
@@ -638,6 +665,67 @@ mod tests {
             );
             server.join().unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn health_rejects_a_backend_with_no_asr_interface() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/api/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut socket = accept(&listener);
+            headers(&mut socket);
+            let body = r#"{"status":"ok","capabilities":{"streaming_asr":false,"file_asr":false}}"#;
+            write!(
+                socket.get_mut(),
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        match crate::backend_capabilities(&url, "").await {
+            Err(error) => assert_eq!(error, "后端未启用语音识别"),
+            Ok(_) => panic!("accepted a backend with no ASR interface"),
+        }
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn streaming_only_does_not_retry_with_the_complete_wav() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut run = TranscriptionRun::new(8);
+        run.backend.server_url = format!("http://{}/api/v1", listener.local_addr().unwrap());
+        run.file_asr_enabled.store(false, Ordering::SeqCst);
+        let run = Arc::new(run);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut socket = accept(&listener);
+            headers(&mut socket);
+            while !chunk(&mut socket).is_empty() {}
+            socket.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{\"type\":\"partial\",\"text\":\"incomplete\"}\n").unwrap();
+            drop(socket);
+            let _ = done_rx.recv_timeout(Duration::from_secs(3));
+            listener.set_nonblocking(true).unwrap();
+            assert!(listener.accept().is_err());
+        });
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "complete WAV").unwrap();
+        let mut upload = start(run.clone(), 16000, 1);
+        upload.send(&[1, 2]);
+        drop(upload);
+        let error = match crate::recognize_for_run(
+            &run,
+            recognition_url(&run.backend.server_url).unwrap(),
+            file.path().to_str().unwrap(),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("streaming-only retried or accepted an incomplete stream"),
+        };
+        assert_ne!(error, CANCELLED);
+        assert!(!error.is_empty());
+        done_tx.send(()).unwrap();
+        server.join().unwrap();
     }
 
     #[tokio::test]
@@ -650,7 +738,7 @@ mod tests {
             crate::backend_capabilities(&run.backend.server_url, &run.backend.api_key)
                 .await
                 .unwrap()
-                .0
+                .streaming
         );
         let mut audio =
             hound::WavReader::open(std::env::var("OPEN_TYPELESS_TEST_WAV").unwrap()).unwrap();

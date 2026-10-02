@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -23,6 +24,8 @@ type server struct {
 	polisher             *polisher
 	client               *http.Client
 	maxBytes             int64
+	// Zero value keeps the multipart endpoint available for existing tests and deployments.
+	disableFileASR bool
 }
 
 type recognitionResponse struct {
@@ -41,6 +44,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	fileASR, err := fileASREnabled()
+	if err != nil {
+		log.Fatal(err)
+	}
 	s := &server{
 		inferenceURL:         strings.TrimRight(env("INFERENCE_URL", "http://localhost:18080"), "/"),
 		inferenceProtocol:    env("INFERENCE_PROTOCOL", "legacy"),
@@ -49,12 +56,10 @@ func main() {
 		polisher:             polish,
 		client:               &http.Client{Timeout: 45 * time.Second},
 		maxBytes:             envInt64("MAX_AUDIO_BYTES", 12<<20),
+		disableFileASR:       !fileASR,
 	}
-	if s.inferenceProtocol != "legacy" && s.inferenceProtocol != "audiocpp" {
-		log.Fatal("INFERENCE_PROTOCOL must be legacy or audiocpp")
-	}
-	if s.inferenceStreamModel != "" && s.inferenceProtocol != "audiocpp" {
-		log.Fatal("INFERENCE_STREAM_MODEL requires INFERENCE_PROTOCOL=audiocpp")
+	if err := validateInference(s.inferenceProtocol, s.inferenceStreamModel, fileASR); err != nil {
+		log.Fatal(err)
 	}
 	addr := env("HTTP_ADDR", ":8080")
 	log.Printf("open-typeless business server listening on %s, inference=%s", addr, s.inferenceURL)
@@ -71,13 +76,20 @@ func (s *server) handler(apiKey string) http.Handler {
 
 func (s *server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": buildinfo.Version,
-		"capabilities": map[string]bool{"streaming_asr": s.inferenceStreamModel != ""},
-		"limits":       map[string]int64{"max_audio_bytes": s.maxBytes}})
+		"capabilities": map[string]bool{
+			"streaming_asr": s.inferenceStreamModel != "",
+			"file_asr":      !s.disableFileASR,
+		},
+		"limits": map[string]int64{"max_audio_bytes": s.maxBytes}})
 }
 
 func (s *server) recognize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.disableFileASR {
+		writeError(w, http.StatusNotImplemented, "file ASR is not configured")
 		return
 	}
 	if r.ContentLength > s.maxBytes+1<<20 {
@@ -156,6 +168,30 @@ func (s *server) recognize(w http.ResponseWriter, r *http.Request) {
 	if r.Context().Err() == nil {
 		writeJSON(w, http.StatusOK, result)
 	}
+}
+
+func fileASREnabled() (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("INFERENCE_FILE_ASR"))) {
+	case "", "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, errors.New("INFERENCE_FILE_ASR must be true or false")
+	}
+}
+
+func validateInference(protocol, streamModel string, fileEnabled bool) error {
+	if protocol != "legacy" && protocol != "audiocpp" {
+		return errors.New("INFERENCE_PROTOCOL must be legacy or audiocpp")
+	}
+	if streamModel != "" && protocol != "audiocpp" {
+		return errors.New("INFERENCE_STREAM_MODEL requires INFERENCE_PROTOCOL=audiocpp")
+	}
+	if !fileEnabled && streamModel == "" {
+		return errors.New("INFERENCE_FILE_ASR=false requires INFERENCE_STREAM_MODEL")
+	}
+	return nil
 }
 
 func env(k, fallback string) string {

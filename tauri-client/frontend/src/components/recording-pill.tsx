@@ -3,6 +3,27 @@ import { Button } from '@/components/ui/button'
 import { previewPillError, type PillError, type PillState } from '@/lib/desktop'
 
 const heights = [9, 11, 15, 19, 23, 29, 34, 26, 19, 13, 10]
+
+// Keep the newest words inside the caption. CJK takes twice the width of ASCII.
+export function liveCaption(text: string) {
+  const chars = Array.from(text.replace(/\s+/g, ' ').trim())
+  let units = 0
+  let start = chars.length
+  for (let index = chars.length - 1; index >= 0; index -= 1) {
+    const unit = chars[index].charCodeAt(0) > 0xff ? 2 : 1
+    if (units + unit > 42) break
+    units += unit
+    start = index
+  }
+  const shown = chars.slice(start).join('')
+  return start > 0 ? `…${shown}` : shown
+}
+
+export function LiveCaption({ text, onDrag }: { text: string; onDrag?: () => void }) {
+  const shown = liveCaption(text)
+  if (!shown) return null
+  return <p className="pill-caption pill-draggable" role="status" aria-label={text.trim()} onMouseDown={event => { if (event.button === 0) onDrag?.() }}>{shown}</p>
+}
 interface Props {
   state: PillState
   error?: PillError

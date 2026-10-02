@@ -78,9 +78,9 @@ unauthenticated and is intended only for local testing.
 
 ## Streaming ASR
 
-Streaming is opt-in on the Business Server and automatic on the desktop. Keep
-`INFERENCE_MODEL` pointed at the existing offline model and set
-`INFERENCE_STREAM_MODEL` to an audio.cpp model registered with `mode: streaming`:
+Streaming is opt-in on the Business Server. Keep `INFERENCE_MODEL` pointed at
+the existing offline model and set `INFERENCE_STREAM_MODEL` to an audio.cpp
+model registered with `mode: streaming`:
 
 ```sh
 BACKEND_API_KEY=local-development-key \
@@ -91,20 +91,29 @@ INFERENCE_STREAM_MODEL=r2t2-asr-stream \
 go run ./cmd/server
 ```
 
-An empty `INFERENCE_STREAM_MODEL` disables streaming and retains the original
-API. Setting it with the legacy inference protocol fails startup. Existing
-legacy Python ASR deployments continue to use the offline interface. The model
-ID must exist in the running audio.cpp service; repository configuration alone
-does not establish that. See the [audio.cpp live endpoint documentation](https://github.com/0xShug0/audio.cpp/blob/main/app/server/README.md#post-v1audiotranscriptionslive).
+Set `INFERENCE_FILE_ASR=false` to disable the multipart endpoint and serve
+streaming only. That setting requires `INFERENCE_STREAM_MODEL` and
+`INFERENCE_PROTOCOL=audiocpp`. An empty `INFERENCE_STREAM_MODEL` disables
+streaming and retains the original API. Setting a streaming model with the
+legacy inference protocol fails startup. Existing legacy Python ASR deployments
+continue to use the offline interface. The model ID must exist in the running
+audio.cpp service; repository configuration alone does not establish that. See
+the [audio.cpp live endpoint documentation](https://github.com/0xShug0/audio.cpp/blob/main/app/server/README.md#post-v1audiotranscriptionslive).
 
-`GET /api/v1/health` returns `capabilities: {"streaming_asr": true}` when enabled.
-The client checks this before each recording using the same URL/key snapshot.
-Absent or false capability fields (including older and debug servers) select
-the original multipart endpoint. Failed streams, HTTP errors, malformed replies,
-and missing final events retry the complete WAV once. Cancellation never retries.
-The current UI keeps its waveform during capture; partial text is consumed by
-the transport, and only the final polished text is saved and pasted. Streaming
-starts once two active 10 ms audio windows are detected, retaining 100 ms of
+`GET /api/v1/health` returns `capabilities.streaming_asr` and
+`capabilities.file_asr`. The client checks both before each recording using the
+same URL/key snapshot. When both are true it prefers `/recognitions/stream`.
+When only one is true it uses that interface. Absent `file_asr` (older and
+debug servers) still means the multipart endpoint is available. Absent or false
+`streaming_asr` selects that endpoint directly. Failed streams, HTTP errors,
+malformed replies, and missing final events retry the complete WAV once, but
+only when file ASR is enabled. Cancellation never retries. While streaming
+capture is open, partial deltas are accumulated and shown above the pill
+capsule. Partials are display-only: only the final polished text is saved and
+pasted. The caption hides when recording stops, fails, or is cancelled, and the
+overlay returns to 128×32 without moving the capsule.
+
+Streaming starts once two active 10 ms audio windows are detected, retaining 100 ms of
 pre-roll. Live PCM, the fallback WAV, and the archive use the same trimmed
 samples, including the queued 200 ms microphone tail at stop. Silence does not
 open an idle streaming connection.
@@ -207,19 +216,19 @@ ls -lh /tmp/open-typeless-debug
 
 ## Preview and validate the pill
 
-Open `http://localhost:5173/?view=pill-debug` in a browser to work on the pill in isolation.
+Open `http://localhost:5173/?view=pill-debug` in a browser to work on the pill in isolation. The gallery includes the live transcript caption above the ready capsule.
 
 When started with `npm run tauri:debug`, the main window's developer options can show or hide the native pill and switch among disconnected, unready, ready, processing, and error states. Selecting a state immediately displays its appearance. This preview does not activate the microphone or call ASR, and is unavailable during recording or recognition. For native visual regression checks, test `processing -> disconnected`, `processing -> ready -> disconnected`, and `processing -> error -> ready`; the capsule's rounded ends and bottom edge must remain intact. The capsule and recognition circle use separate elements with fixed dimensions and switch opacity, avoiding residual macOS clipping caused by resizing a shared element.
 
 Failed recording attempts (including a missing backend URL or failed health check), recording failures, recognition failures, and history/paste warnings display a red error pill. It shows a short label, with the full message available on hover and in the main window. The error remains until dismissed with its close button or Esc, or replaced by another recording attempt or preview. Background idle health checks do not show the pill. Session checks prevent cancelled or superseded requests from displaying stale errors.
 
-The pill initially appears centered horizontally on the main screen, with its bottom edge 128 logical pixels above the screen bottom. The waveform, right-side waiting indicator, and recognition circle can all be dragged and display a grab cursor. The dragged position persists until the application exits. On macOS, the pill accepts the first mouse click without taking keyboard focus. Esc cancels the current recording or recognition while the pill is visible and is released when the pill is hidden. Cancellation stops the client request and prevents results from old sessions from being pasted.
+The pill initially appears centered horizontally on the main screen, with its bottom edge 128 logical pixels above the screen bottom. While a streaming transcript is visible, the overlay grows upward and the caption can be dragged with the waveform. The waveform, right-side waiting indicator, recognition circle, and live caption can all be dragged and display a grab cursor. The dragged position persists until the application exits. On macOS, the pill accepts the first mouse click without taking keyboard focus. Esc cancels the current recording or recognition while the pill is visible and is released when the pill is hidden. Cancellation stops the client request and prevents results from old sessions from being pasted.
 
 ## Shortcut and recognition behavior
 
 The macOS default shortcut is `RCommand`: press and release right Command by itself to start recording, then repeat to stop and recognize. Using another key, modifier, or mouse click while holding it cancels that shortcut activation, so combinations such as right Command+C do not start recording. Native AppKit local and global event listeners implement this behavior and require accessibility permission. The UI shows a prompt if permission is missing; restart the application after granting it. Windows defaults to standalone right Control (`RControl`), detected through a native keyboard listener. In settings, capture a single key or a conventional key combination; it takes effect on release. The shortcut, backend URL, and API key are saved automatically and restored at the next launch.
 
-The client streams PCM during recording when the health check advertises streaming support. It also creates a temporary WAV after recording stops for local history and offline fallback. Without streaming support, or when the stream fails, it uploads that complete WAV to the Business Server. It writes nonempty `polished_text` to the clipboard, falling back to `raw_text` when the field is absent, null, or blank, and simulates `Ctrl/Command+V` to paste into the current window. The server URL is empty by default. Enter a backend address in the main window's settings tab; pressing Enter or moving focus saves it automatically. Use `http://127.0.0.1:8080/api/v1` for a local service or, for example, `https://example.com/api/v1` behind a reverse proxy. The client treats this as the complete API base URL and appends `/recognitions` or `/recognitions/stream` for recognition requests.
+The client prefers streaming PCM when the health check advertises it, and uses the multipart upload when that is the only advertised interface. It also creates a temporary WAV after recording stops for local history and, when file ASR is enabled, for offline fallback. A failed stream uploads that complete WAV only if file ASR is enabled. While a stream is open, the pill shows the accumulated partial transcript above the capsule. It writes nonempty `polished_text` to the clipboard, falling back to `raw_text` when the field is absent, null, or blank, and simulates `Ctrl/Command+V` to paste into the current window. The server URL is empty by default. Enter a backend address in the main window's settings tab; pressing Enter or moving focus saves it automatically. Use `http://127.0.0.1:8080/api/v1` for a local service or, for example, `https://example.com/api/v1` behind a reverse proxy. The client treats this as the complete API base URL and appends `/recognitions` or `/recognitions/stream` for recognition requests.
 
 Shortcut capture starts only when the input itself is clicked. Press the desired keys and release them to apply the shortcut without a save button. Ordinary single keys and standalone left/right Command, Ctrl, Shift, and Alt are supported, as are modifier-plus-key combinations. Click elsewhere to cancel capture. Esc can also be the activation key, but it still cancels recognition while the pill is visible. Recording is disabled until the backend URL is configured. Regular `tauri dev` does not show developer options.
 

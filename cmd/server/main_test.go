@@ -13,6 +13,40 @@ import (
 	"testing"
 )
 
+func TestFileASRConfiguration(t *testing.T) {
+	t.Setenv("INFERENCE_FILE_ASR", "")
+	enabled, err := fileASREnabled()
+	if err != nil || !enabled {
+		t.Fatalf("default file ASR: %v %v", enabled, err)
+	}
+	for _, value := range []string{"0", "false", "off", "NO"} {
+		t.Setenv("INFERENCE_FILE_ASR", value)
+		enabled, err = fileASREnabled()
+		if err != nil || enabled {
+			t.Fatalf("%s enabled file ASR: %v %v", value, enabled, err)
+		}
+	}
+	t.Setenv("INFERENCE_FILE_ASR", "maybe")
+	if _, err = fileASREnabled(); err == nil {
+		t.Fatal("accepted invalid INFERENCE_FILE_ASR")
+	}
+	if err := validateInference("audiocpp", "live", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateInference("legacy", "", false); err == nil {
+		t.Fatal("streaming-only mode accepted without a streaming model")
+	}
+	if err := validateInference("legacy", "live", true); err == nil {
+		t.Fatal("streaming model accepted with the legacy protocol")
+	}
+	s := &server{disableFileASR: true, maxBytes: 32}
+	response := httptest.NewRecorder()
+	s.recognize(response, recognitionRequest(t, ""))
+	if response.Code != http.StatusNotImplemented || !strings.Contains(response.Body.String(), "file ASR is not configured") {
+		t.Fatalf("file endpoint stayed available: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestHealthPublishesConfiguredAudioLimit(t *testing.T) {
 	s := &server{maxBytes: 123456, inferenceStreamModel: "live"}
 	w := httptest.NewRecorder()

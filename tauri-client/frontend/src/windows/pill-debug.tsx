@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { RecordingPill } from '@/components/recording-pill'
+import { LiveCaption, RecordingPill } from '@/components/recording-pill'
 import type { PillState } from '@/lib/desktop'
 
 const states: { state: PillState; label: string }[] = [
@@ -20,6 +20,13 @@ export function PillDebug() {
       <p className="pill-debug-label">{label}</p>
       <div className="pill-stage"><RecordingPill state={state} level={level} /></div>
     </div>)}
+    <div className="pill-debug-row">
+      <p className="pill-debug-label">实时识别</p>
+      <div className="pill-stage has-caption">
+        <LiveCaption text="这是一段比较长的实时识别结果，用来确认胶囊上方只保留最新的文字" />
+        <RecordingPill state="ready" level={level} />
+      </div>
+    </div>
 
   </main>
 }
