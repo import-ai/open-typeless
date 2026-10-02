@@ -221,11 +221,15 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    return;
+                }
+            }
             if window.label() == "main"
-                && matches!(
-                    event,
-                    tauri::WindowEvent::Focused(false) | tauri::WindowEvent::Destroyed
-                )
+                && matches!(event, tauri::WindowEvent::Focused(false) | tauri::WindowEvent::Destroyed)
             {
                 let app = window.app_handle();
                 if let Err(error) = set_shortcut_capture(app.clone(), app.state(), false) {
@@ -253,8 +257,17 @@ fn main() {
             set_shortcut,
             set_shortcut_capture
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Open Typeless");
+        .build(tauri::generate_context!())
+        .expect("error while building Open Typeless")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        });
 }
 
 fn default_shortcut_name() -> &'static str {
