@@ -46,6 +46,23 @@ If recording or recognition fails, the floating indicator turns red and shows an
 
 To change the shortcut, click the shortcut field in settings, press your preferred key or key combination, then release it to save. Click elsewhere to cancel shortcut capture.
 
+### Xiaomi remote microphone (macOS)
+
+Pair your Xiaomi Bluetooth Voice Remote with macOS, then choose **Use Xiaomi
+remote microphone** in Open Typeless settings. Allow Bluetooth and Input
+Monitoring access in **System Settings > Privacy & Security** when requested;
+restart the app after changing permissions. Wait for the remote to report that
+it is ready, focus the app where you want the text, then **hold the voice key
+while speaking and release it to recognize and paste**. Audio comes from the
+remote itself. Esc cancels recording or recognition.
+
+This mode supports one Xiaomi remote with HID vendor/product IDs `2717:32B8`
+and firmware `2671`, using ATVV v1.0 audio. It requires macOS 10.15 or newer. F5 is
+reserved while this mode is active so the remote cannot refresh the target app;
+pressing F5 on a regular keyboard does not start recording. Choose a keyboard
+shortcut again to return to the computer microphone and release F5. Do not run
+another remote microphone app at the same time.
+
 ## Personal dictionary
 
 Use the dictionary tab to add terms you say often, such as product names or technical vocabulary. You can edit, search, and delete entries individually or in bulk. Changes apply to your next recording and are saved for future sessions.

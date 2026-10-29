@@ -24,6 +24,56 @@ npm run tauri build # Desktop build; builds the frontend automatically
 
 Add shadcn components by running `npx shadcn@latest add <component>` from `tauri-client/`. Component source lives in `frontend/src/components/ui/`. See the [frontend development guide](frontend.md) for integration rationale and directory conventions.
 
+## Xiaomi remote microphone
+
+The `XiaomiRemote` shortcut mode selects the remote microphone instead of CPAL.
+The existing atomic settings file stores this selection in its `shortcut`
+field. Other modes keep using the default system microphone. Windows builds
+exclude the native bridge and reject this mode.
+
+On macOS, `src/remote_microphone.m` uses CoreBluetooth for ATVV and IOKit for
+the device-specific voice key (`07:003E`, vendor/product `2717:32B8`). It connects
+to the paired device named `小米蓝牙语音遥控器`, subscribes to audio and control
+notifications, and negotiates ATVV v1.0. The Rust module validates capabilities
+and decodes 120-byte, 16 kHz IMA ADPCM frames. The protocol reference is
+[mi-ao](https://github.com/fanxeon/mi-ao); attribution and its MIT license are in
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). Only this device/format is
+supported; unknown protocols and malformed audio are rejected.
+
+Each voice-key press has an ID. Release events apply only to the matching
+recording, including releases during backend health checks. A late release
+cannot stop a new session; cancellation drops the capture sink and waits for
+the old remote stream to close before another can start. The backend URL/key
+and dictionary snapshots, health check, trimmed PCM, WAV fallback, size/duration
+limits, history, cancellation checks and paste path are shared with CPAL.
+Firmware can send `AUDIO_START` before the HID press event. The bridge adopts
+that stream, preserves its decoded head in a bounded buffer until health checks
+complete, and does not issue another `MIC_OPEN` or reset the decoder.
+On release, capture waits for the queued audio through `AUDIO_STOP` before
+publishing EOF. Connection failures and timeouts surface through remote status
+and recording errors/warnings. The bridge reconnects after disconnection.
+
+The macOS build compiles the Objective-C bridge with the existing platform
+toolchain through `cc`. The app bundle declares Bluetooth usage and the
+Bluetooth entitlement. Real-device checks require a bundled app, Bluetooth
+and Input Monitoring permissions, and Accessibility permission for pasting.
+Do not run mi-ao concurrently: both apps would control the same microphone.
+
+For native validation, select the remote mode and test hold/release into a
+scratch document, a short tap, Esc while holding, Esc during recognition,
+rapid re-press, disconnection during recording, and switching back to a regular
+shortcut. Confirm that the archived WAV contains the remote microphone audio
+and its tail. Protocol/decoder tests run with `cargo test --locked`; frontend
+shortcut tests use the existing Node test command.
+
+The native early-start/release regression runs without Bluetooth hardware on macOS:
+
+```sh
+clang -fobjc-arc -framework Foundation -framework CoreBluetooth -framework IOKit \
+  tests/remote-microphone.test.m -o /tmp/open-typeless-remote-test
+/tmp/open-typeless-remote-test
+```
+
 ## Backend authentication
 
 The Go Business Server requires `BACKEND_API_KEY`; startup fails if it is empty
