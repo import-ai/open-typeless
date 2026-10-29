@@ -65,6 +65,7 @@ struct TranscriptionRun {
     transcribing: AtomicBool,
     finalizing: AtomicBool,
     hotwords: String,
+    remote_id: Option<u64>,
     backend: BackendSettings,
     cancelled: AtomicBool,
     notification: tokio::sync::Notify,
@@ -85,6 +86,7 @@ impl TranscriptionRun {
             transcribing: AtomicBool::new(false),
             finalizing: AtomicBool::new(false),
             hotwords: String::new(),
+            remote_id: None,
             backend: BackendSettings::default(),
             cancelled: AtomicBool::new(false),
             notification: tokio::sync::Notify::new(),
@@ -606,7 +608,7 @@ fn unbind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
 fn reserve_remote_key(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let key = parse_shortcut("F5")?;
     // Consume the remote's F5 so holding its voice key cannot refresh the target app.
-    // Recording itself is triggered only by the device-specific HID listener.
+    // ATVV events alone start and finish remote recordings.
     if enabled {
         app.global_shortcut().on_shortcut(key, |_, _, _| {}).map_err(|e| e.to_string())
     } else {
@@ -740,6 +742,7 @@ async fn start_recording(app: AppHandle, remote_id: Option<u64>) -> Result<(), S
             return Err("已有录音或识别进行中".into());
         }
         let mut run = TranscriptionRun::new(state.next_run.fetch_add(1, Ordering::SeqCst));
+        run.remote_id = remote_id;
         run.backend = state.backend.lock().map_err(|e| e.to_string())?.clone();
         let setup = (|| {
             let _guard = state.dictionary_lock.lock().map_err(|e| e.to_string())?;
@@ -795,6 +798,8 @@ async fn start_recording(app: AppHandle, remote_id: Option<u64>) -> Result<(), S
     }
     .await;
     if let Err(error) = &result {
+        #[cfg(target_os = "macos")]
+        if let Some(id) = remote_id { remote_microphone::discard(id); }
         finish_run(&app, run.id, Some(PillError::new(error_label, error))).await;
     }
     result
@@ -816,8 +821,11 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>, rem
                 .transpose().map_err(|e| e.to_string())?;
             let sample_rate = supported.as_ref().map(|config| config.sample_rate().0).unwrap_or(16000);
             let channels = supported.as_ref().map(|config| config.channels()).unwrap_or(1);
-            let samples = Arc::new(Mutex::new(recording::Audio::new(sample_rate, channels,
-                capture_run.max_audio_bytes.load(Ordering::SeqCst) as usize)?));
+            let max_bytes = capture_run.max_audio_bytes.load(Ordering::SeqCst) as usize;
+            let max_bytes = if remote_id.is_some() {
+                max_bytes.min(44 + sample_rate as usize * channels as usize * 2 * recording::MAX_RECORDING_SECONDS as usize)
+            } else { max_bytes };
+            let samples = Arc::new(Mutex::new(recording::Audio::new(sample_rate, channels, max_bytes)?));
             let sink = samples.clone();
             let capture_ready_once = Arc::new(AtomicBool::new(false));
             let error_events = app.clone();
@@ -1132,6 +1140,8 @@ fn cancel_active(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
     if let Some(run) = active.take() {
+        #[cfg(target_os = "macos")]
+        if let Some(id) = run.remote_id { remote_microphone::discard(id); }
         let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
         if recorder
             .as_ref()

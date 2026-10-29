@@ -31,8 +31,8 @@ The existing atomic settings file stores this selection in its `shortcut`
 field. Other modes keep using the default system microphone. Windows builds
 exclude the native bridge and reject this mode.
 
-On macOS, `src/remote_microphone.m` uses CoreBluetooth for ATVV and IOKit for
-the device-specific voice key (`07:003E`, vendor/product `2717:32B8`). It connects
+On macOS, `src/remote_microphone.m` uses CoreBluetooth for the complete ATVV
+recording lifecycle, without HID listeners or Input Monitoring access. It connects
 to the paired device named `小米蓝牙语音遥控器`, subscribes to audio and control
 notifications, and negotiates ATVV v1.0. The Rust module validates capabilities
 and decodes 120-byte, 16 kHz IMA ADPCM frames. The protocol reference is
@@ -40,23 +40,30 @@ and decodes 120-byte, 16 kHz IMA ADPCM frames. The protocol reference is
 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). Only this device/format is
 supported; unknown protocols and malformed audio are rejected.
 
-Each voice-key press has an ID. Release events apply only to the matching
-recording, including releases during backend health checks. A late release
-cannot stop a new session; cancellation drops the capture sink and waits for
-the old remote stream to close before another can start. The backend URL/key
-and dictionary snapshots, health check, trimmed PCM, WAV fallback, size/duration
-limits, history, cancellation checks and paste path are shared with CPAL.
-Firmware can send `AUDIO_START` before the HID press event. The bridge adopts
-that stream, preserves its decoded head in a bounded buffer until health checks
-complete, and does not issue another `MIC_OPEN` or reset the decoder.
-On release, capture waits for the queued audio through `AUDIO_STOP` before
-publishing EOF. Connection failures and timeouts surface through remote status
-and recording errors/warnings. The bridge reconnects after disconnection.
+`START_SEARCH` requests `MIC_OPEN` only while idle. `AUDIO_START` creates a
+recording session; `AUDIO_STOP` supplies its EOF and triggers recognition. A
+firmware-initiated `AUDIO_START` also works without `START_SEARCH`. Duplicate
+requests do not reopen the microphone or reset its decoder. Decoded audio is
+buffered until backend health checks complete; if the remote stops first, the
+entire completed buffer is still attached to the matching recognition session.
+
+Each ATVV session has an ID. Late stops and cleanup cannot affect another
+session. New streams while busy or editing are closed and ignored; cancelled
+streams are drained without accepting more audio. Cancellation and failed
+backend checks discard the matching pending buffer and close the microphone.
+The backend URL/key and dictionary snapshots, health checks, trimmed PCM, WAV
+fallback, size/duration limits, history, cancellation checks and paste path are
+shared with CPAL. The remote WAV size also caps total audio at four minutes,
+including the head buffered during health checks. On manual stop, capture waits
+for the queued audio through `AUDIO_STOP` before publishing EOF. Connection
+failures and timeouts surface through remote status and recording errors or
+warnings. The bridge reconnects after disconnection.
 
 The macOS build compiles the Objective-C bridge with the existing platform
 toolchain through `cc`. The app bundle declares Bluetooth usage and the
 Bluetooth entitlement. Real-device checks require a bundled app, Bluetooth
-and Input Monitoring permissions, and Accessibility permission for pasting.
+permission, and Accessibility permission for pasting. No Input Monitoring
+permission is requested by the remote recording path.
 Do not run mi-ao concurrently: both apps would control the same microphone.
 
 For native validation, select the remote mode and test hold/release into a
@@ -66,10 +73,10 @@ shortcut. Confirm that the archived WAV contains the remote microphone audio
 and its tail. Protocol/decoder tests run with `cargo test --locked`; frontend
 shortcut tests use the existing Node test command.
 
-The native early-start/release regression runs without Bluetooth hardware on macOS:
+The native ATVV start/stop regression runs without Bluetooth hardware on macOS:
 
 ```sh
-clang -fobjc-arc -framework Foundation -framework CoreBluetooth -framework IOKit \
+clang -fobjc-arc -framework Foundation -framework CoreBluetooth \
   tests/remote-microphone.test.m -o /tmp/open-typeless-remote-test
 /tmp/open-typeless-remote-test
 ```

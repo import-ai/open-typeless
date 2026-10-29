@@ -6,7 +6,7 @@ The Xiaomi remote ATVV v1.0 protocol handling and IMA ADPCM decoding in
 `tauri-client/src/remote_microphone.rs` were adapted from
 [fanxeon/mi-ao](https://github.com/fanxeon/mi-ao), revision
 `d6019bc`. The Bluetooth transport was implemented for Open Typeless using
-Apple's CoreBluetooth and IOKit APIs. Open Typeless uses the standard IMA
+Apple's CoreBluetooth APIs. Open Typeless uses the standard IMA
 ADPCM step table.
 
 MIT License

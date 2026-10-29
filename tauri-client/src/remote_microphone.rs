@@ -1,4 +1,4 @@
-//! Xiaomi firmware 2671: device-specific voice button and ATVV v1.0 audio.
+//! Xiaomi firmware 2671: ATVV v1.0 controls the complete recording lifecycle.
 //! Protocol/ADPCM adapted from fanxeon/mi-ao (MIT); see THIRD_PARTY_NOTICES.md.
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
@@ -57,38 +57,162 @@ fn capabilities(data: &[u8]) -> Result<(), String> {
 }
 
 struct Sink {
-    id: u64,
     run: Arc<TranscriptionRun>,
     audio: Arc<Mutex<Audio>>,
-    ready: Option<mpsc::Sender<Result<(), String>>>,
     ended: mpsc::Sender<()>,
 }
-impl Sink {
-    fn start(&mut self, pending: Vec<i16>) {
-        self.audio.lock().unwrap().push(pending.into_iter());
-        if let Some(ready) = self.ready.take() {
-            let _ = ready.send(Ok(()));
+
+struct Session {
+    id: u64,
+    stream_id: u8,
+    decoder: Decoder,
+    pending: Vec<i16>,
+    ended: bool,
+    sink: Option<Sink>,
+}
+impl Session {
+    fn feed(&mut self, data: &[u8]) -> Result<f64, String> {
+        if self.ended
+            || self
+                .sink
+                .as_ref()
+                .is_some_and(|sink| sink.run.check().is_err())
+        {
+            return Ok(0.0);
         }
+        if data.len() != 120 {
+            return Err("遥控器音频帧长度无效".into());
+        }
+        let samples = self.decoder.decode(data);
+        let level = samples
+            .iter()
+            .map(|sample| (*sample as f64).abs())
+            .sum::<f64>()
+            / (samples.len() as f64 * 32768.0);
+        if let Some(sink) = self.sink.as_ref() {
+            sink.audio
+                .lock()
+                .map_err(|e| e.to_string())?
+                .push(samples.into_iter());
+        } else if self.pending.len() + samples.len()
+            <= 16000 * crate::recording::MAX_RECORDING_SECONDS as usize
+        {
+            self.pending.extend(samples);
+        } else {
+            return Err("遥控器音频缓冲已满，请松开语音键后重试".into());
+        }
+        Ok(level)
+    }
+
+    fn finish(&mut self) -> bool {
+        if self.ended {
+            return false;
+        }
+        self.ended = true;
+        if let Some(sink) = self.sink.as_ref() {
+            let _ = sink.ended.send(());
+        }
+        true
+    }
+
+    fn attach(
+        &mut self,
+        run: Arc<TranscriptionRun>,
+        audio: Arc<Mutex<Audio>>,
+    ) -> Result<mpsc::Receiver<()>, String> {
+        run.check()?;
+        if self.sink.is_some() {
+            return Err("遥控器已有录音进行中".into());
+        }
+        audio
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(std::mem::take(&mut self.pending).into_iter());
+        let (ended, result) = mpsc::channel();
+        if self.ended {
+            let _ = ended.send(());
+        }
+        self.sink = Some(Sink { run, audio, ended });
+        Ok(result)
     }
 }
+
+enum Start {
+    New(u64),
+    Duplicate,
+    Ignored,
+}
+#[derive(Default)]
+struct Sessions {
+    next_id: u64,
+    current: Option<Session>,
+    ignoring: bool,
+}
+impl Sessions {
+    fn start(&mut self, stream_id: u8, blocked: bool) -> Result<Start, String> {
+        if self.ignoring {
+            return Ok(Start::Ignored);
+        }
+        if let Some(session) = self.current.as_ref().filter(|session| !session.ended) {
+            return if session.stream_id == stream_id {
+                Ok(Start::Duplicate)
+            } else {
+                Err("遥控器在上次录音结束前切换了音频流".into())
+            };
+        }
+        if blocked
+            || self
+                .current
+                .as_ref()
+                .is_some_and(|session| session.sink.is_some())
+        {
+            self.ignoring = true;
+            return Ok(Start::Ignored);
+        }
+        self.next_id += 1;
+        self.current = Some(Session {
+            id: self.next_id,
+            stream_id,
+            decoder: Decoder::default(),
+            pending: Vec::new(),
+            ended: false,
+            sink: None,
+        });
+        Ok(Start::New(self.next_id))
+    }
+
+    fn stop(&mut self) -> Option<u64> {
+        if self.ignoring {
+            self.ignoring = false;
+            return None;
+        }
+        let session = self.current.as_mut()?;
+        session.finish().then_some(session.id)
+    }
+
+    fn discard(&mut self, id: u64) -> bool {
+        if self.current.as_ref().is_none_or(|session| session.id != id) {
+            return false;
+        }
+        let session = self.current.take().unwrap();
+        if !session.ended {
+            self.ignoring = true;
+        }
+        true
+    }
+}
+
 struct Remote {
     app: AppHandle,
     enabled: bool,
     ready: bool,
-    held: bool,
-    busy: bool,
-    press: u64,
     status: String,
-    decoder: Decoder,
-    streaming: bool,
-    pending: Vec<i16>,
-    sink: Option<Sink>,
+    sessions: Sessions,
 }
 static REMOTE: OnceLock<Mutex<Remote>> = OnceLock::new();
 
 extern "C" {
     fn ot_remote_enable(callback: extern "C" fn(u32, *const u8, usize), enabled: bool);
-    fn ot_remote_open();
     fn ot_remote_close();
     fn ot_remote_reset();
 }
@@ -98,14 +222,8 @@ pub fn install(app: &AppHandle) {
         app: app.clone(),
         enabled: false,
         ready: false,
-        held: false,
-        busy: false,
-        press: 0,
         status: "小米遥控器未启用".into(),
-        decoder: Decoder::default(),
-        streaming: false,
-        pending: Vec::new(),
-        sink: None,
+        sessions: Sessions::default(),
     }));
 }
 
@@ -120,21 +238,22 @@ pub fn configure(enabled: bool) -> Result<(), String> {
     }
     remote.enabled = enabled;
     remote.ready = false;
-    remote.held = false;
-    remote.busy = false;
-    remote.streaming = false;
-    remote.pending.clear();
-    if let Some(sink) = remote.sink.as_ref() {
+    if let Some(sink) = remote
+        .sessions
+        .current
+        .as_ref()
+        .and_then(|session| session.sink.as_ref())
+    {
         sink.run.cancel();
     }
-    remote.sink = None;
+    remote.sessions.current = None;
+    remote.sessions.ignoring = false;
     remote.status = if enabled {
         "正在连接小米遥控器…"
     } else {
         "小米遥控器未启用"
     }
     .into();
-    // The bridge always dispatches to the main queue, never calls back under this lock.
     unsafe {
         ot_remote_enable(receive, enabled);
     }
@@ -151,17 +270,16 @@ pub fn status() -> String {
 fn failure(remote: &mut Remote, message: String) {
     remote.status = message.clone();
     remote.ready = false;
-    remote.held = false;
-    remote.busy = false;
-    remote.streaming = false;
-    remote.pending.clear();
-    if let Some(sink) = remote.sink.as_mut() {
-        *sink.run.capture_error.lock().unwrap() = Some(message.clone());
-        if let Some(ready) = sink.ready.take() {
-            let _ = ready.send(Err(message));
+    remote.sessions.ignoring = false;
+    if let Some(session) = remote.sessions.current.as_mut() {
+        session.pending.clear();
+        if let Some(sink) = session.sink.as_ref() {
+            *sink.run.capture_error.lock().unwrap() = Some(message);
         }
-        let _ = sink.ended.send(());
-        let _ = remote.app.emit_to("main", "remote-stop-requested", sink.id);
+        session.finish();
+        let _ = remote
+            .app
+            .emit_to("main", "remote-stop-requested", session.id);
     }
     unsafe {
         ot_remote_reset();
@@ -169,7 +287,7 @@ fn failure(remote: &mut Remote, message: String) {
 }
 
 extern "C" fn receive(kind: u32, bytes: *const u8, length: usize) {
-    // All native callbacks are synchronous; their payload is copied/decoded before returning.
+    // Native callback payloads remain valid only until this function returns.
     if bytes.is_null() || length == 0 || length > 4096 {
         return;
     }
@@ -184,120 +302,94 @@ extern "C" fn receive(kind: u32, bytes: *const u8, length: usize) {
     let old_status = remote.status.clone();
     match kind {
         1 => remote.status = String::from_utf8_lossy(data).into_owned(),
-        2 => {
-            let down = data[0] != 0;
-            if remote.held == down {
-                return;
-            }
-            remote.held = down;
-            if down {
-                remote.press = remote.press.wrapping_add(1);
-                let suspended = remote
-                    .app
-                    .state::<crate::AppState>()
-                    .shortcut_capturing
-                    .lock()
-                    .map(|v| *v)
-                    .unwrap_or(true);
-                if !suspended {
-                    let _ = remote
-                        .app
-                        .emit_to("main", "remote-start-requested", remote.press);
-                }
-            } else {
-                let _ = remote
-                    .app
-                    .emit_to("main", "remote-stop-requested", remote.press);
-            }
-        }
         3 => match data[0] {
             0x0b => match capabilities(data) {
                 Ok(()) => {
                     remote.ready = true;
                     remote.status = "小米遥控器已就绪 · 按住语音键说话，松开后识别".into();
                 }
-                Err(error) => {
-                    remote.ready = false;
-                    failure(&mut remote, error);
-                }
+                Err(error) => failure(&mut remote, error),
             },
             4 => {
                 if data.len() < 4 || data[2] != 2 {
                     failure(&mut remote, "遥控器返回了不支持的录音格式".into());
                 } else {
-                    remote.decoder = Decoder::default();
-                    remote.streaming = true;
-                    remote.pending.clear();
-                    if let Some(sink) = remote.sink.as_mut() {
-                        sink.start(Vec::new());
+                    let state = app.state::<crate::AppState>();
+                    let blocked = !remote.ready
+                        || state
+                            .shortcut_capturing
+                            .try_lock()
+                            .map(|v| *v)
+                            .unwrap_or(true)
+                        || state
+                            .active
+                            .try_lock()
+                            .map(|run| run.is_some())
+                            .unwrap_or(true);
+                    match remote.sessions.start(data[3], blocked) {
+                        Ok(Start::New(id)) => {
+                            let _ = app.emit_to("main", "remote-start-requested", id);
+                        }
+                        Ok(Start::Duplicate) => (),
+                        Ok(Start::Ignored) => unsafe {
+                            ot_remote_close();
+                        },
+                        Err(error) => failure(&mut remote, error),
                     }
                 }
             }
-            0x0a => {
+            0x0a if !remote.sessions.ignoring => {
                 if data.len() != 7 || data[1] != 2 || data[6] > 88 {
                     failure(&mut remote, "遥控器音频同步数据无效".into());
-                } else {
-                    remote.decoder = Decoder {
+                } else if let Some(session) = remote
+                    .sessions
+                    .current
+                    .as_mut()
+                    .filter(|session| !session.ended)
+                {
+                    session.decoder = Decoder {
                         predictor: i16::from_be_bytes([data[4], data[5]]) as i32,
                         index: data[6] as usize,
                     };
                 }
             }
             0 => {
-                remote.busy = false;
-                remote.streaming = false;
-                remote.pending.clear();
-                if let Some(sink) = remote.sink.as_mut() {
-                    if let Some(ready) = sink.ready.take() {
-                        let _ = ready.send(Err("录音过短，未收到遥控器音频".into()));
-                    }
-                    let _ = sink.ended.send(());
-                    let _ = app.emit_to("main", "remote-stop-requested", sink.id);
+                if let Some(id) = remote.sessions.stop() {
+                    let _ = app.emit_to("main", "remote-stop-requested", id);
                 }
             }
             0x0c => failure(
                 &mut remote,
                 "遥控器拒绝打开麦克风，请松开语音键后重试".into(),
             ),
-            _ => {}
+            _ => (),
         },
-        4 => {
-            if !remote.streaming
-                || remote
-                    .sink
-                    .as_ref()
-                    .is_some_and(|sink| sink.run.check().is_err())
-            {
-                return;
-            }
-            if data.len() != 120 {
-                failure(&mut remote, "遥控器音频帧长度无效".into());
-            } else {
-                let samples = remote.decoder.decode(data);
-                let level = samples
-                    .iter()
-                    .map(|sample| (*sample as f64).abs())
-                    .sum::<f64>()
-                    / (samples.len() as f64 * 32768.0);
-                if let Some(sink) = remote.sink.as_ref() {
-                    sink.audio.lock().unwrap().push(samples.into_iter());
-                } else if remote.pending.len() + samples.len()
-                    <= 16000 * crate::recording::MAX_RECORDING_SECONDS as usize
-                {
-                    // The remote can start before HID; retain audio until health checks finish.
-                    remote.pending.extend(samples);
-                } else {
-                    failure(&mut remote, "遥控器音频缓冲已满，请松开语音键后重试".into());
+        4 if !remote.sessions.ignoring => {
+            if let Some(session) = remote.sessions.current.as_mut() {
+                match session.feed(data) {
+                    Ok(level) => {
+                        let _ = app.emit("mic-level", level);
+                    }
+                    Err(error) => failure(&mut remote, error),
                 }
-                let _ = remote.app.emit("mic-level", level);
             }
         }
         5 => failure(&mut remote, String::from_utf8_lossy(data).into_owned()),
-        _ => return,
+        _ => (),
     }
     if remote.status != old_status {
         eprintln!("remote microphone: {}", remote.status);
-        let _ = remote.app.emit_to("main", "remote-status", &remote.status);
+        let _ = app.emit_to("main", "remote-status", &remote.status);
+    }
+}
+
+pub fn discard(id: u64) {
+    if let Some(mut remote) = REMOTE.get().and_then(|remote| remote.lock().ok()) {
+        if remote.sessions.discard(id) {
+            unsafe {
+                ot_remote_close();
+            }
+        }
     }
 }
 
@@ -320,29 +412,15 @@ impl Capture {
         if !remote.enabled || !remote.ready {
             return Err(remote.status.clone());
         }
-        if !remote.held || remote.press != id {
-            return Err("语音键已松开，请按住语音键后说话".into());
-        }
-        if remote.sink.is_some() || remote.busy {
-            return Err("遥控器正在结束上次录音，请松开后重试".into());
-        }
-        let (ended, receive) = mpsc::channel();
-        let mut sink = Sink {
-            id,
-            run,
-            audio,
-            ready: Some(ready),
-            ended,
-        };
-        if remote.streaming {
-            sink.start(std::mem::take(&mut remote.pending));
-        }
-        remote.sink = Some(sink);
-        remote.busy = true;
-        unsafe {
-            ot_remote_open();
-        }
-        Ok(Self { id, ended: receive })
+        let session = remote
+            .sessions
+            .current
+            .as_mut()
+            .filter(|session| session.id == id)
+            .ok_or("遥控器录音已取消或被新会话替代")?;
+        let ended = session.attach(run, audio)?;
+        let _ = ready.send(Ok(()));
+        Ok(Self { id, ended })
     }
     pub fn finish(&self) -> Result<(), String> {
         unsafe {
@@ -355,14 +433,7 @@ impl Capture {
 }
 impl Drop for Capture {
     fn drop(&mut self) {
-        if let Some(mut remote) = REMOTE.get().and_then(|remote| remote.lock().ok()) {
-            if remote.sink.as_ref().is_some_and(|sink| sink.id == self.id) {
-                unsafe {
-                    ot_remote_close();
-                }
-                remote.sink = None;
-            }
-        }
+        discard(self.id);
     }
 }
 
@@ -438,40 +509,68 @@ mod tests {
     }
 
     #[test]
-    fn audio_started_before_capture_preserves_the_head_and_reports_ready_once() {
-        let audio = Arc::new(Mutex::new(Audio::new(16000, 1, 4096).unwrap()));
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let (ended, _) = mpsc::channel();
-        let mut sink = Sink {
-            id: 1,
-            run: Arc::new(TranscriptionRun::new(1)),
-            audio: audio.clone(),
-            ready: Some(ready_tx),
-            ended,
-        };
-        let mut decoder = Decoder::default();
-        let head = decoder.decode(&[0x17; 120]);
-        sink.start(head.clone());
-        sink.start(Vec::new());
-        assert_eq!(ready_rx.try_recv(), Ok(Ok(())));
-        assert!(ready_rx.try_recv().is_err());
-        let tail = decoder.decode(&[0x77; 120]);
-        audio.lock().unwrap().push(tail.iter().copied());
-        let wav = Arc::try_unwrap({
-            drop(sink);
-            audio
-        })
-        .ok()
-        .unwrap()
-        .into_inner()
-        .unwrap()
-        .finish()
-        .unwrap();
-        let samples = hound::WavReader::new(std::io::Cursor::new(wav))
+    fn atvv_stop_during_health_check_preserves_complete_audio_and_eof() {
+        let mut sessions = Sessions::default();
+        assert!(matches!(sessions.start(7, false).unwrap(), Start::New(1)));
+        let head = sessions.current.as_mut().unwrap();
+        head.feed(&[0x17; 120]).unwrap();
+        assert!(matches!(sessions.start(7, true).unwrap(), Start::Duplicate));
+        sessions
+            .current
+            .as_mut()
             .unwrap()
-            .samples::<i16>()
-            .collect::<Result<Vec<_>, _>>()
+            .feed(&[0x77; 120])
             .unwrap();
-        assert_eq!(samples, [head, tail].concat());
+        let expected = sessions.current.as_ref().unwrap().pending.clone();
+        assert_eq!(sessions.stop(), Some(1));
+        assert_eq!(sessions.stop(), None);
+        let audio = Arc::new(Mutex::new(Audio::new(16000, 1, 4096).unwrap()));
+        let ended = sessions
+            .current
+            .as_mut()
+            .unwrap()
+            .attach(Arc::new(TranscriptionRun::new(1)), audio.clone())
+            .unwrap();
+        assert_eq!(ended.try_recv(), Ok(()));
+        assert!(sessions.current.as_ref().unwrap().pending.is_empty());
+        sessions.discard(1);
+        let wav = Arc::try_unwrap(audio)
+            .ok()
+            .unwrap()
+            .into_inner()
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert_eq!(
+            hound::WavReader::new(std::io::Cursor::new(wav))
+                .unwrap()
+                .samples::<i16>()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn cancelled_and_ignored_streams_cannot_reach_another_session() {
+        let mut sessions = Sessions::default();
+        assert!(matches!(sessions.start(4, false).unwrap(), Start::New(1)));
+        sessions
+            .current
+            .as_mut()
+            .unwrap()
+            .feed(&[0x77; 120])
+            .unwrap();
+        assert!(sessions.discard(1));
+        assert!(sessions.current.is_none());
+        assert!(matches!(sessions.start(5, false).unwrap(), Start::Ignored));
+        assert_eq!(sessions.stop(), None);
+        assert!(matches!(sessions.start(5, false).unwrap(), Start::New(2)));
+        assert!(!sessions.discard(1));
+        assert_eq!(sessions.current.as_ref().unwrap().id, 2);
+        sessions.stop();
+        assert!(matches!(sessions.start(6, true).unwrap(), Start::Ignored));
+        assert_eq!(sessions.stop(), None);
+        assert_eq!(sessions.current.as_ref().unwrap().id, 2);
     }
 }

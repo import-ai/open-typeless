@@ -5,7 +5,7 @@ fn main() {
             .file("src/remote_microphone.m")
             .flag("-fobjc-arc")
             .compile("remote_microphone");
-        for framework in ["CoreBluetooth", "Foundation", "IOKit"] {
+        for framework in ["CoreBluetooth", "Foundation"] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
     }

@@ -10,6 +10,11 @@
 - (void)fail:(NSString *)message { [self.errors addObject:message]; }
 @end
 
+static void control(TestRemote *remote, NSData *data) {
+    ((CBMutableCharacteristic *)remote.control).value = data;
+    [remote peripheral:remote.peripheral didUpdateValueForCharacteristic:remote.control error:nil];
+}
+
 int main(void) {
     @autoreleasepool {
         TestRemote *remote = [TestRemote new];
@@ -21,29 +26,36 @@ int main(void) {
         remote.control = [[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:controlID]
             properties:CBCharacteristicPropertyNotify value:nil permissions:CBAttributePermissionsReadable];
         const uint8_t start[] = {4, 0, 2, 9};
-        ((CBMutableCharacteristic *)remote.control).value = [NSData dataWithBytes:start length:sizeof(start)];
-        [remote peripheral:remote.peripheral didUpdateValueForCharacteristic:remote.control error:nil];
-        [remote button:YES];
-        [remote openMicrophone];
-        assert(remote.streaming && remote.held);
-        assert(remote.errors.count == 0 && remote.writes.count == 0);
-
-        [remote button:NO];
-        [remote closeMicrophone];
-        const uint8_t close[] = {0x0d, 9};
-        assert(remote.writes.count == 1);
-        assert([remote.writes[0] isEqual:[NSData dataWithBytes:close length:sizeof(close)]]);
-        [remote openMicrophone];
-        assert(remote.errors.count == 0 && remote.writes.count == 1);
         const uint8_t stop[] = {0, 0};
-        ((CBMutableCharacteristic *)remote.control).value = [NSData dataWithBytes:stop length:sizeof(stop)];
-        [remote peripheral:remote.peripheral didUpdateValueForCharacteristic:remote.control error:nil];
-        [remote button:YES];
-        [remote openMicrophone];
-        [remote openMicrophone];
+        const uint8_t search[] = {8};
         const uint8_t open[] = {0x0c, 0};
-        assert(remote.writes.count == 2 && remote.errors.count == 0);
-        assert([remote.writes[1] isEqual:[NSData dataWithBytes:open length:sizeof(open)]]);
-        puts("PASS: both event orders work; open/close are idempotent without disconnecting");
+        const uint8_t close[] = {0x0d, 9};
+        NSData *started = [NSData dataWithBytes:start length:sizeof(start)];
+        NSData *stopped = [NSData dataWithBytes:stop length:sizeof(stop)];
+        NSData *searched = [NSData dataWithBytes:search length:sizeof(search)];
+
+        // Firmware may start audio without START_SEARCH; no HID event is required.
+        control(remote, started);
+        control(remote, searched);
+        [remote openMicrophone];
+        assert(remote.streaming && remote.errors.count == 0 && remote.writes.count == 0);
+        control(remote, stopped);
+        assert(!remote.streaming && !remote.opening && !remote.closing);
+        assert(remote.writes.count == 0);
+
+        control(remote, searched);
+        control(remote, searched);
+        assert(remote.opening && remote.writes.count == 1);
+        assert([remote.writes[0] isEqual:[NSData dataWithBytes:open length:sizeof(open)]]);
+        control(remote, started);
+        control(remote, searched);
+        assert(remote.writes.count == 1 && remote.streaming);
+        [remote closeMicrophone];
+        [remote closeMicrophone];
+        assert(remote.writes.count == 2);
+        assert([remote.writes[1] isEqual:[NSData dataWithBytes:close length:sizeof(close)]]);
+        control(remote, stopped);
+        assert(remote.errors.count == 0 && !remote.streaming && !remote.closing);
+        puts("PASS: ATVV alone starts/stops audio; duplicate requests and cancellation are idempotent");
     }
 }
