@@ -741,6 +741,9 @@ async fn start_recording(app: AppHandle, remote_id: Option<u64>) -> Result<(), S
         if active.is_some() {
             return Err("已有录音或识别进行中".into());
         }
+        // Back can discard a remote stream before its frontend start request arrives.
+        #[cfg(target_os = "macos")]
+        if let Some(id) = remote_id { remote_microphone::check(id)?; }
         let mut run = TranscriptionRun::new(state.next_run.fetch_add(1, Ordering::SeqCst));
         run.remote_id = remote_id;
         run.backend = state.backend.lock().map_err(|e| e.to_string())?.clone();

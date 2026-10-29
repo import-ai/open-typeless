@@ -298,7 +298,7 @@ export function MainWindow() {
           <Button variant="outline" disabled={(desktop && !loaded) || saving || capturingShortcut || phase !== 'idle'} onClick={() => { void saveShortcut('XiaomiRemote').catch(console.error) }}>
             使用小米遥控器麦克风
           </Button>
-          <p className="text-xs text-muted-foreground">按住遥控器语音键录音，松开后识别并粘贴。重新录入快捷键可切回电脑麦克风。</p>
+          <p className="text-xs text-muted-foreground">按住遥控器语音键录音，松开后识别并粘贴。松开语音键后，立即按返回键可取消识别；空闲时在输入框中退格，需允许输入监控。按住语音键时可用键盘 Esc 取消。重新录入快捷键可切回电脑麦克风。</p>
           {shortcut === 'XiaomiRemote' && <p role="status" className="text-xs text-muted-foreground">{remoteStatus}</p>}
         </div>}
       </section>

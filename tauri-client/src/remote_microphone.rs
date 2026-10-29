@@ -149,6 +149,10 @@ struct Sessions {
     ignoring: bool,
 }
 impl Sessions {
+    fn check(&self, id: u64) -> Result<(), String> {
+        if self.current.as_ref().is_some_and(|session| session.id == id) { Ok(()) }
+        else { Err(crate::CANCELLED.into()) }
+    }
     fn start(&mut self, stream_id: u8, blocked: bool) -> Result<Start, String> {
         if self.ignoring {
             return Ok(Start::Ignored);
@@ -207,6 +211,7 @@ struct Remote {
     enabled: bool,
     ready: bool,
     status: String,
+    button_warning: String,
     sessions: Sessions,
 }
 static REMOTE: OnceLock<Mutex<Remote>> = OnceLock::new();
@@ -215,6 +220,7 @@ extern "C" {
     fn ot_remote_enable(callback: extern "C" fn(u32, *const u8, usize), enabled: bool);
     fn ot_remote_close();
     fn ot_remote_reset();
+    fn ot_remote_text_focused() -> bool;
 }
 
 pub fn install(app: &AppHandle) {
@@ -223,6 +229,7 @@ pub fn install(app: &AppHandle) {
         enabled: false,
         ready: false,
         status: "小米遥控器未启用".into(),
+        button_warning: String::new(),
         sessions: Sessions::default(),
     }));
 }
@@ -238,6 +245,7 @@ pub fn configure(enabled: bool) -> Result<(), String> {
     }
     remote.enabled = enabled;
     remote.ready = false;
+    remote.button_warning.clear();
     if let Some(sink) = remote
         .sessions
         .current
@@ -260,10 +268,15 @@ pub fn configure(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn display_status(remote: &Remote) -> String {
+    if remote.button_warning.is_empty() { remote.status.clone() }
+    else { format!("{} · {}", remote.status, remote.button_warning) }
+}
+
 pub fn status() -> String {
     REMOTE
         .get()
-        .and_then(|remote| remote.lock().ok().map(|r| r.status.clone()))
+        .and_then(|remote| remote.lock().ok().map(|r| display_status(&r)))
         .unwrap_or_else(|| "遥控器监听未初始化".into())
 }
 
@@ -299,7 +312,27 @@ extern "C" fn receive(kind: u32, bytes: *const u8, length: usize) {
         return;
     }
     let app = remote.app.clone();
-    let old_status = remote.status.clone();
+    if kind == 2 {
+        let pending = remote.sessions.current.as_ref().map(|session| session.id);
+        drop(remote);
+        let result = (|| -> Result<(), String> {
+            let active = app.state::<crate::AppState>().active.lock().map_err(|e| e.to_string())?.is_some();
+            if pending.is_some() || active {
+                if let Some(id) = pending { discard(id); }
+                crate::cancel_active(&app)
+            } else if unsafe { ot_remote_text_focused() } {
+                use enigo::{Direction, Key, Keyboard};
+                enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| e.to_string())?
+                    .key(Key::Backspace, Direction::Click).map_err(|e| e.to_string())
+            } else { Ok(()) }
+        })();
+        if let Err(error) = result {
+            eprintln!("remote Back: {error}");
+            let _ = app.emit_to("main", "remote-status", format!("返回键操作失败: {error}"));
+        }
+        return;
+    }
+    let old_status = display_status(&remote);
     match kind {
         1 => remote.status = String::from_utf8_lossy(data).into_owned(),
         3 => match data[0] {
@@ -375,12 +408,19 @@ extern "C" fn receive(kind: u32, bytes: *const u8, length: usize) {
             }
         }
         5 => failure(&mut remote, String::from_utf8_lossy(data).into_owned()),
+        6 => remote.button_warning = String::from_utf8_lossy(data).into_owned(),
         _ => (),
     }
-    if remote.status != old_status {
-        eprintln!("remote microphone: {}", remote.status);
-        let _ = app.emit_to("main", "remote-status", &remote.status);
+    let status = display_status(&remote);
+    if status != old_status {
+        eprintln!("remote microphone: {status}");
+        let _ = app.emit_to("main", "remote-status", &status);
     }
+}
+
+pub fn check(id: u64) -> Result<(), String> {
+    REMOTE.get().ok_or("遥控器监听未初始化")?.lock().map_err(|e| e.to_string())?
+        .sessions.check(id)
 }
 
 pub fn discard(id: u64) {
@@ -563,11 +603,14 @@ mod tests {
             .unwrap();
         assert!(sessions.discard(1));
         assert!(sessions.current.is_none());
+        assert_eq!(sessions.check(1), Err(crate::CANCELLED.into()));
         assert!(matches!(sessions.start(5, false).unwrap(), Start::Ignored));
         assert_eq!(sessions.stop(), None);
         assert!(matches!(sessions.start(5, false).unwrap(), Start::New(2)));
         assert!(!sessions.discard(1));
         assert_eq!(sessions.current.as_ref().unwrap().id, 2);
+        assert!(sessions.check(2).is_ok());
+        assert!(sessions.check(1).is_err());
         sessions.stop();
         assert!(matches!(sessions.start(6, true).unwrap(), Start::Ignored));
         assert_eq!(sessions.stop(), None);

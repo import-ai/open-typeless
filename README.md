@@ -55,7 +55,14 @@ requested and Accessibility access for pasting in **System Settings > Privacy
 Wait for the remote to report that it is ready, focus the app where you want
 the text, then **hold the voice key
 while speaking and release it to recognize and paste**. Audio comes from the
-remote itself. Esc cancels recording or recognition.
+remote itself. **Esc** cancels recording or recognition. The remote **Back** key
+also cancels when its button event is available. On the tested firmware, Back
+is not reported while the voice key is held: release the voice key and press
+Back immediately to cancel pending recognition, or use keyboard Esc while holding.
+While idle, **Back** acts as Backspace in the focused editable text field; holding
+it does not repeat deletion. The Back key requires **Input Monitoring** permission
+for Open Typeless; restart the app after granting it. Without that permission,
+voice recording and Esc cancellation still work.
 
 This mode is tested with one Xiaomi remote (`2717:32B8`, firmware `2671`),
 using ATVV v1.0 audio on macOS. Recording starts and ends from the remote

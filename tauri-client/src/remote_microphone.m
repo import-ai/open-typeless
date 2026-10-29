@@ -1,7 +1,10 @@
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <Foundation/Foundation.h>
+#import <ApplicationServices/ApplicationServices.h>
+#import <IOKit/hid/IOHIDManager.h>
+#import <IOKit/hidsystem/IOHIDLib.h>
 
-// Events: status, ATVV control, ADPCM audio, transport failure.
+// Events: status, Back press, ATVV control, ADPCM audio, transport failure, button warning.
 typedef void (*RemoteCallback)(unsigned int, const unsigned char *, size_t);
 static RemoteCallback callback;
 static NSString *const serviceID = @"AB5E0001-5A21-4F05-BC7D-AF01F617B664";
@@ -15,6 +18,8 @@ static void emit(unsigned int kind, NSData *data) {
 static void status(NSString *message) { emit(1, [message dataUsingEncoding:NSUTF8StringEncoding]); }
 
 @interface OTRemoteMicrophone : NSObject <CBCentralManagerDelegate, CBPeripheralDelegate>
+@property IOHIDManagerRef buttons;
+@property BOOL backDown;
 @property CBCentralManager *central;
 @property CBPeripheral *peripheral;
 @property CBCharacteristic *tx;
@@ -31,14 +36,57 @@ static void status(NSString *message) { emit(1, [message dataUsingEncoding:NSUTF
 @property BOOL closing;
 @property uint8_t streamID;
 - (void)write:(NSData *)data;
+- (void)backPage:(uint32_t)page usage:(uint32_t)usage value:(CFIndex)value;
 - (void)closeMicrophone;
 - (void)findRemote;
 - (void)fail:(NSString *)message;
 @end
 
+static void backValue(void *context, IOReturn result, void *sender, IOHIDValueRef value) {
+    (void)sender;
+    if (result != kIOReturnSuccess) return;
+    IOHIDElementRef element = IOHIDValueGetElement(value);
+    [(__bridge OTRemoteMicrophone *)context backPage:IOHIDElementGetUsagePage(element)
+        usage:IOHIDElementGetUsage(element) value:IOHIDValueGetIntegerValue(value)];
+}
+static void backRemoved(void *context, IOReturn result, void *sender, IOHIDDeviceRef device) {
+    (void)result; (void)sender; (void)device;
+    ((__bridge OTRemoteMicrophone *)context).backDown = NO;
+}
+
 @implementation OTRemoteMicrophone
+- (void)backPage:(uint32_t)page usage:(uint32_t)usage value:(CFIndex)value {
+    if (!self.enabled || page != 7 || usage != 0xf1) return;
+    BOOL pressed = value != 0;
+    BOOL fire = pressed && !self.backDown;
+    self.backDown = pressed;
+    if (fire) { const uint8_t event = 1; emit(2, [NSData dataWithBytes:&event length:1]); }
+}
+- (void)listenForBack {
+    if (IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) != kIOHIDAccessTypeGranted) {
+        IOHIDRequestAccess(kIOHIDRequestTypeListenEvent);
+        emit(6, [@"返回键需要输入监控权限：请在系统设置 → 隐私与安全性 → 输入监控中允许 Open Typeless，然后重启应用" dataUsingEncoding:NSUTF8StringEncoding]);
+        return;
+    }
+    self.buttons = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+    IOHIDManagerSetDeviceMatching(self.buttons, (__bridge CFDictionaryRef)@{
+        @kIOHIDVendorIDKey: @0x2717, @kIOHIDProductIDKey: @0x32b8});
+    IOHIDManagerRegisterInputValueCallback(self.buttons, backValue, (__bridge void *)self);
+    IOHIDManagerRegisterDeviceRemovalCallback(self.buttons, backRemoved, (__bridge void *)self);
+    IOHIDManagerScheduleWithRunLoop(self.buttons, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+    if (IOHIDManagerOpen(self.buttons, kIOHIDOptionsTypeNone) != kIOReturnSuccess) {
+        emit(6, [@"无法监听遥控器返回键，请检查输入监控权限后重启应用" dataUsingEncoding:NSUTF8StringEncoding]);
+    }
+}
 - (void)setListening:(BOOL)enabled {
     if (!enabled) {
+        if (self.buttons) {
+            IOHIDManagerUnscheduleFromRunLoop(self.buttons, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+            IOHIDManagerClose(self.buttons, kIOHIDOptionsTypeNone);
+            CFRelease(self.buttons);
+            self.buttons = NULL;
+        }
+        self.backDown = NO;
         [self closeMicrophone];
         self.enabled = NO;
         self.opening = NO;
@@ -54,6 +102,7 @@ static void status(NSString *message) { emit(1, [message dataUsingEncoding:NSUTF
         return;
     }
     self.enabled = YES;
+    [self listenForBack];
     status(@"正在连接小米遥控器…");
     self.central = [[CBCentralManager alloc] initWithDelegate:self queue:dispatch_get_main_queue()];
     __weak OTRemoteMicrophone *weakSelf = self;
@@ -237,4 +286,25 @@ void ot_remote_reset(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (remote.peripheral) [remote.central cancelPeripheralConnection:remote.peripheral];
     });
+}
+
+// Only send Backspace to an editable accessibility text control, never a file view.
+bool ot_remote_text_focused(void) {
+    AXUIElementRef system = AXUIElementCreateSystemWide();
+    CFTypeRef focused = NULL;
+    CFTypeRef role = NULL;
+    BOOL editable = NO;
+    if (AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute, &focused) == kAXErrorSuccess
+        && CFGetTypeID(focused) == AXUIElementGetTypeID()
+        && AXUIElementCopyAttributeValue((AXUIElementRef)focused, kAXRoleAttribute, &role) == kAXErrorSuccess) {
+        BOOL text = CFEqual(role, kAXTextFieldRole) || CFEqual(role, kAXTextAreaRole) || CFEqual(role, kAXComboBoxRole);
+        Boolean settable = false;
+        if (text && AXUIElementIsAttributeSettable((AXUIElementRef)focused, kAXValueAttribute, &settable) == kAXErrorSuccess) {
+            editable = settable;
+        }
+    }
+    if (role) CFRelease(role);
+    if (focused) CFRelease(focused);
+    CFRelease(system);
+    return editable;
 }

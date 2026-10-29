@@ -15,12 +15,32 @@ static void control(TestRemote *remote, NSData *data) {
     [remote peripheral:remote.peripheral didUpdateValueForCharacteristic:remote.control error:nil];
 }
 
+static unsigned int backPresses;
+static void received(unsigned int kind, const unsigned char *bytes, size_t length) {
+    if (kind == 2) { assert(length == 1 && bytes[0] == 1); backPresses++; }
+}
+
 int main(void) {
     @autoreleasepool {
         TestRemote *remote = [TestRemote new];
         remote.writes = [NSMutableArray array];
         remote.errors = [NSMutableArray array];
+        callback = received;
+        [remote backPage:7 usage:0xf1 value:1];
+        assert(backPresses == 0);
         remote.enabled = YES;
+        [remote backPage:7 usage:0x3e value:1];
+        [remote backPage:12 usage:0xf1 value:1];
+        assert(backPresses == 0);
+        [remote backPage:7 usage:0xf1 value:1];
+        [remote backPage:7 usage:0xf1 value:1];
+        [remote backPage:7 usage:0xf1 value:0];
+        assert(backPresses == 1);
+        [remote backPage:7 usage:0xf1 value:1];
+        backRemoved((__bridge void *)remote, kIOReturnSuccess, NULL, NULL);
+        [remote backPage:7 usage:0xf1 value:1];
+        assert(backPresses == 3);
+        [remote backPage:7 usage:0xf1 value:0];
         remote.negotiated = YES;
         remote.peripheral = (CBPeripheral *)[NSObject new];
         remote.control = [[CBMutableCharacteristic alloc] initWithType:[CBUUID UUIDWithString:controlID]
@@ -56,6 +76,6 @@ int main(void) {
         assert([remote.writes[1] isEqual:[NSData dataWithBytes:close length:sizeof(close)]]);
         control(remote, stopped);
         assert(remote.errors.count == 0 && !remote.streaming && !remote.closing);
-        puts("PASS: ATVV alone starts/stops audio; duplicate requests and cancellation are idempotent");
+        puts("PASS: ATVV lifecycle, Back filtering, duplicate presses, and device removal");
     }
 }

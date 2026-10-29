@@ -32,7 +32,7 @@ field. Other modes keep using the default system microphone. Windows builds
 exclude the native bridge and reject this mode.
 
 On macOS, `src/remote_microphone.m` uses CoreBluetooth for the complete ATVV
-recording lifecycle, without HID listeners or Input Monitoring access. It connects
+recording lifecycle, independently of HID listeners or Input Monitoring access. It connects
 to the paired device named `小米蓝牙语音遥控器`, subscribes to audio and control
 notifications, and negotiates ATVV v1.0. The Rust module validates capabilities
 and decodes 120-byte, 16 kHz IMA ADPCM frames. The protocol reference is
@@ -62,12 +62,26 @@ warnings. The bridge reconnects after disconnection.
 The macOS build compiles the Objective-C bridge with the existing platform
 toolchain through `cc`. The app bundle declares Bluetooth usage and the
 Bluetooth entitlement. Real-device checks require a bundled app, Bluetooth
-permission, and Accessibility permission for pasting. No Input Monitoring
-permission is requested by the remote recording path.
+permission, and Accessibility permission for pasting. The ATVV audio transport
+itself does not require Input Monitoring.
+A separate, non-seizing IOHIDManager listens only to vendor `2717`, product
+`32B8`, keyboard usage `07:F1` (Back). It emits once per press, ignores repeats,
+and resets the held state on device removal. Back discards pending ATVV audio
+and uses the existing cancellation path during startup, recording, or recognition.
+While idle it sends Backspace through Enigo only when the focused accessibility
+control is a text field, text area, or combo box with a writable value. Controls
+without editable accessibility support are left alone. The Back listener requires
+Input Monitoring; denial is shown alongside remote status and does not disable
+ATVV recording. Its manager is closed when remote mode is disabled. On the
+tested firmware, pressing Back while holding the voice key generates no Back
+HID report. Therefore use keyboard Esc during a hold, or release the voice key
+and press Back before recognition completes. Do not infer a simultaneous-button
+cancellation failure from app state alone; inspect the actual HID reports.
 Do not run mi-ao concurrently: both apps would control the same microphone.
 
 For native validation, select the remote mode and test hold/release into a
-scratch document, a short tap, Esc while holding, Esc during recognition,
+scratch document, Backspace in an editable field, Back outside text fields,
+a short tap, Back/Esc while holding, Back/Esc during recognition,
 rapid re-press, disconnection during recording, and switching back to a regular
 shortcut. Confirm that the archived WAV contains the remote microphone audio
 and its tail. Protocol/decoder tests run with `cargo test --locked`; frontend
@@ -76,7 +90,8 @@ shortcut tests use the existing Node test command.
 The native ATVV start/stop regression runs without Bluetooth hardware on macOS:
 
 ```sh
-clang -fobjc-arc -framework Foundation -framework CoreBluetooth \
+clang -Wall -Wextra -Werror -fobjc-arc -framework Foundation -framework CoreBluetooth \
+  -framework IOKit -framework ApplicationServices \
   tests/remote-microphone.test.m -o /tmp/open-typeless-remote-test
 /tmp/open-typeless-remote-test
 ```
