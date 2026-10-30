@@ -809,7 +809,7 @@ async fn start_recording(app: AppHandle, remote_id: Option<u64>) -> Result<(), S
 }
 fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>, remote_id: Option<u64>) -> Result<(), String> {
     let (ready_tx, ready_rx) = mpsc::channel();
-    let (capture_ready_tx, capture_ready_rx) = mpsc::channel();
+    let (capture_ready_tx, capture_ready_rx) = mpsc::channel::<Result<(), String>>();
     let (stop_tx, stop_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
     *run.capture_stop.lock().map_err(|e| e.to_string())? = Some(stop_tx.clone());
