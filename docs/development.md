@@ -248,6 +248,10 @@ header and are not forwarded to ASR. Redirects are rejected.
 
 The upload has a 15-second idle deadline and the stream a five-minute lifetime.
 After EOF, ASR has 40 seconds; polishing retains its separate `LLM_TIMEOUT`.
+The server appends one second of silent PCM to the audio.cpp request after a
+valid upload finishes. This flushes final words that the current streaming
+model can omit at immediate EOF. The padding is inference-only: it does not
+change the archived WAV, recorded duration, or client upload size limit.
 The desktop waits up to 60 seconds after stopping before falling back; the
 fallback HTTP request also has a 60-second timeout. Health advertises
 `limits.max_audio_bytes`. Capture is bounded by the smaller of that limit and
