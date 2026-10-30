@@ -24,6 +24,40 @@ npm run tauri build # Desktop build; builds the frontend automatically
 
 Add shadcn components by running `npx shadcn@latest add <component>` from `tauri-client/`. Component source lives in `frontend/src/components/ui/`. See the [frontend development guide](frontend.md) for integration rationale and directory conventions.
 
+## Permission settings
+
+The permissions panel below the main window's settings reads permission state
+without starting recording or connecting to a remote. It polls while mounted
+and refreshes on focus. On macOS, startup requests the microphone if its status
+is not determined, then requests Accessibility after the microphone decision.
+Previously denied microphone access is not requested again automatically.
+Remote-only permissions are requested when remote mode is enabled.
+
+`src/permissions.rs` exposes a fixed permission enum through `get_permissions`
+and `request_permission`. On macOS, `src/permissions.m` reads AVFoundation,
+Accessibility, CoreBluetooth, and IOHID authorization state. Requests run on
+the main thread and use the native prompt or the corresponding System Settings
+page. Reading status never requests access. Restricted permissions are shown
+as managed by system policy. On Windows, the microphone action opens
+`ms-settings:privacy-microphone`; status is unknown because desktop-app access
+is managed in Windows settings. The macOS-only permission rows are not applicable.
+Browser previews do not query or change system permissions.
+
+Validate native permission flows using a bundled app: check an unrequested
+permission, grant/deny it, return from System Settings, and reopen the settings tab.
+Previously denied permissions may not prompt again. Do not reset the user's
+permission database as part of routine tests.
+
+The native authorization regression uses mocked system APIs, so it does not
+change real permissions:
+
+```sh
+clang -Wall -Wextra -Werror -fobjc-arc -framework AppKit -framework AVFoundation \
+  -framework CoreBluetooth -framework ApplicationServices -framework IOKit \
+  tests/permissions.test.m -o /tmp/open-typeless-permissions-test
+/tmp/open-typeless-permissions-test
+```
+
 ## Xiaomi remote microphone
 
 The `XiaomiRemote` shortcut mode selects the remote microphone instead of CPAL.
@@ -71,7 +105,8 @@ and uses the existing cancellation path during startup, recording, or recognitio
 While idle it sends Backspace through Enigo only when the focused accessibility
 control is a text field, text area, or combo box with a writable value. Controls
 without editable accessibility support are left alone. The Back listener requires
-Input Monitoring; denial is shown alongside remote status and does not disable
+Input Monitoring, requested through the native authorization API whenever remote
+mode starts; denial is shown alongside remote status and does not disable
 ATVV recording. Its manager is closed when remote mode is disabled. On the
 tested firmware, pressing Back while holding the voice key generates no Back
 HID report. Therefore use keyboard Esc during a hold, or release the voice key

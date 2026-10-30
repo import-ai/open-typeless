@@ -17,8 +17,13 @@ export const windowLabel = desktop
   : new URLSearchParams(location.search).get('view') ?? 'main'
 
 export interface RecordingFile { path: string; run_id: number }
+export type PermissionId = 'microphone' | 'accessibility' | 'bluetooth' | 'input_monitoring'
+export type PermissionStatus = 'not_determined' | 'restricted' | 'denied' | 'granted' | 'not_granted' | 'unsupported' | 'unknown'
+export interface PermissionState { id: PermissionId; status: PermissionStatus }
 export interface Settings { shortcut: string; server_url: string; api_key: string; shortcut_warning: string | null; settings_warning: string | null; remote_status: string | null; developer_options: boolean; tray_visible: boolean; dock_visible: boolean }
 export const commands = {
+  permissions: async () => desktop ? invoke<PermissionState[]>('get_permissions') : (['microphone', 'accessibility', 'bluetooth', 'input_monitoring'] as const).map(id => ({ id, status: 'unknown' as const })),
+  requestPermission: (permission: PermissionId) => invoke<void>('request_permission', { permission }),
   history: async (cursor?: HistoryCursor) => desktop ? invoke<HistoryPage>('get_history_page', { cursor: cursor ?? null }) : previewHistory(),
   insights: async () => desktop ? invoke<Insights>('get_insights') : previewInsights(),
   deleteHistory: async (id: string) => desktop ? invoke<void>('delete_history_entry', { id }) : deletePreviewEntry(id),

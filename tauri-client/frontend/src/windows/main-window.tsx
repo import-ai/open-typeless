@@ -3,6 +3,7 @@ import { Tabs } from 'radix-ui'
 import { DictionaryPanel } from '@/components/dictionary-panel'
 import { HistoryPanel } from '@/components/history-panel'
 import { InsightsPanel } from '@/components/insights-panel'
+import { PermissionSettings } from '@/components/permission-settings'
 import { Mic, Square } from 'lucide-react'
 import { DeveloperOptions } from '@/components/developer-options'
 import { ShortcutKeys } from '@/components/shortcut-keys'
@@ -326,6 +327,7 @@ export function MainWindow() {
       </section>
       {settingsWarning && <p role="status" className="mt-3 text-xs text-destructive">{settingsWarning}</p>}
     </section>
+    <PermissionSettings disabled={phase !== 'idle' || capturingShortcut} />
     {developerOptions && <DeveloperOptions disabled={phase !== 'idle' || capturingShortcut} />}
     </Tabs.Content>
     </Tabs.Root>

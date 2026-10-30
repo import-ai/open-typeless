@@ -1,5 +1,14 @@
+#define IOHIDRequestAccess testRequestAccess
 #import "../src/remote_microphone.m"
+#undef IOHIDRequestAccess
 #include <assert.h>
+
+static unsigned int accessRequests;
+bool testRequestAccess(IOHIDRequestType requestType) {
+    assert(requestType == kIOHIDRequestTypeListenEvent);
+    accessRequests++;
+    return false;
+}
 
 @interface TestRemote : OTRemoteMicrophone
 @property NSMutableArray<NSData *> *writes;
@@ -16,8 +25,10 @@ static void control(TestRemote *remote, NSData *data) {
 }
 
 static unsigned int backPresses;
+static unsigned int buttonWarnings;
 static void received(unsigned int kind, const unsigned char *bytes, size_t length) {
     if (kind == 2) { assert(length == 1 && bytes[0] == 1); backPresses++; }
+    if (kind == 6) { assert(length > 0); buttonWarnings++; }
 }
 
 int main(void) {
@@ -26,6 +37,8 @@ int main(void) {
         remote.writes = [NSMutableArray array];
         remote.errors = [NSMutableArray array];
         callback = received;
+        [remote listenForBack];
+        assert(accessRequests == 1 && buttonWarnings == 1 && remote.buttons == NULL);
         [remote backPage:7 usage:0xf1 value:1];
         assert(backPresses == 0);
         remote.enabled = YES;

@@ -4,6 +4,8 @@ mod recording;
 mod modifier_shortcut;
 mod settings_file;
 mod streaming;
+mod permissions;
+use permissions::{get_permissions, request_permission};
 #[cfg(target_os = "macos")]
 mod remote_microphone;
 
@@ -337,6 +339,7 @@ fn main() {
             setup_tray(app)?;
             apply_presence(app.handle())?;
             position_pill(app.handle())?;
+            permissions::request_startup_permissions(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -377,6 +380,8 @@ fn main() {
             set_presence_settings,
             check_server_connection,
             get_settings,
+            get_permissions,
+            request_permission,
             get_dictionary,
             save_dictionary_entry,
             delete_dictionary_entries,

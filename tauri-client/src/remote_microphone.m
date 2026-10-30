@@ -63,8 +63,7 @@ static void backRemoved(void *context, IOReturn result, void *sender, IOHIDDevic
     if (fire) { const uint8_t event = 1; emit(2, [NSData dataWithBytes:&event length:1]); }
 }
 - (void)listenForBack {
-    if (IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) != kIOHIDAccessTypeGranted) {
-        IOHIDRequestAccess(kIOHIDRequestTypeListenEvent);
+    if (!IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)) {
         emit(6, [@"返回键需要输入监控权限：请在系统设置 → 隐私与安全性 → 输入监控中允许 Open Typeless，然后重启应用" dataUsingEncoding:NSUTF8StringEncoding]);
         return;
     }

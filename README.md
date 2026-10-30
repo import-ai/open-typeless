@@ -23,10 +23,10 @@ Non-release builds include the workflow run ID immediately followed by its attem
 
 ## Set up
 
-1. Open Open Typeless and go to the settings tab.
+1. Open Open Typeless. On macOS, the app requests microphone access and Accessibility permission at startup. Go to the settings tab to see permission status and authorization buttons. Bluetooth and Input Monitoring are requested when Xiaomi remote mode is enabled.
 2. Enter the backend URL supplied by your service operator, for example `https://example.com/api/v1`. Press Enter or click elsewhere to save it.
 3. Enter the API key supplied by your service operator. Press Enter or click elsewhere to save it.
-4. On macOS, allow microphone access and grant accessibility permission in **System Settings > Privacy & Security**. Restart the app after granting accessibility permission.
+4. If permission was previously denied, the authorization button opens its page in **System Settings > Privacy & Security**. Enable it there and restart after granting Accessibility or Input Monitoring. On Windows, use the microphone button to open privacy settings and allow desktop apps to access the microphone; its status must be checked there.
 5. Wait for the app to report that it is ready.
 
 Your backend address, API key, and shortcut are saved automatically. Recording is unavailable until the backend is configured, reachable, and accepts your API key.
@@ -61,7 +61,8 @@ is not reported while the voice key is held: release the voice key and press
 Back immediately to cancel pending recognition, or use keyboard Esc while holding.
 While idle, **Back** acts as Backspace in the focused editable text field; holding
 it does not repeat deletion. The Back key requires **Input Monitoring** permission
-for Open Typeless; restart the app after granting it. Without that permission,
+for Open Typeless. Enabling remote mode requests this permission through macOS;
+restart the app after granting it. Without that permission,
 voice recording and Esc cancellation still work.
 
 This mode is tested with one Xiaomi remote (`2717:32B8`, firmware `2671`),
