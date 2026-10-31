@@ -116,6 +116,10 @@ func (s *server) recognizeStream(w http.ResponseWriter, r *http.Request) {
 		if uploadErr == nil && (audioBytes == 0 || audioBytes%int64(2*config.Channels) != 0) {
 			uploadErr = errors.New("empty or incomplete PCM audio")
 		}
+		if uploadErr == nil {
+			// shortcut: audio.cpp needs 1s of trailing silence; remove after upstream EOF flushing is verified.
+			_, uploadErr = output.Write(make([]byte, config.SampleRate*config.Channels*2))
+		}
 		close(uploaded)
 		_ = output.CloseWithError(uploadErr)
 	}()

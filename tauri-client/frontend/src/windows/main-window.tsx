@@ -3,6 +3,7 @@ import { Tabs } from 'radix-ui'
 import { DictionaryPanel } from '@/components/dictionary-panel'
 import { HistoryPanel } from '@/components/history-panel'
 import { InsightsPanel } from '@/components/insights-panel'
+import { PermissionSettings } from '@/components/permission-settings'
 import { Mic, Square } from 'lucide-react'
 import { DeveloperOptions } from '@/components/developer-options'
 import { ShortcutKeys } from '@/components/shortcut-keys'
@@ -23,11 +24,13 @@ export function MainWindow() {
   const phaseRef = useRef<Phase>('idle')
   const busy = useRef(false)
   const stopPending = useRef(false)
+  const activeRemote = useRef<number | null>(null)
   const epoch = useRef(0)
   const pillVisible = useRef(false)
   const [mic, setMic] = useState<MicState>('disconnected')
   const [status, setStatus] = useState(desktop ? '就绪' : '界面预览 · 请在桌面应用中录音')
   const [shortcut, setShortcut] = useState(desktop ? '' : previewShortcut)
+  const [remoteStatus, setRemoteStatus] = useState('')
   const [serverUrl, setServerUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [configuredApiKey, setConfiguredApiKey] = useState('')
@@ -52,13 +55,14 @@ export function MainWindow() {
   const [saving, setSaving] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const changePhase = (next: Phase) => { phaseRef.current = next; setPhase(next) }
-  const reset = () => { stopPending.current = false; changePhase('idle'); setMic('disconnected') }
+  const reset = () => { stopPending.current = false; activeRemote.current = null; changePhase('idle'); setMic('disconnected') }
   useEffect(() => {
     if (!desktop) return
     let active = true
     void commands.settings().then(settings => {
       if (!active) return
       setShortcut(settings.shortcut)
+      setRemoteStatus(settings.remote_status ?? '')
       setServerUrl(settings.server_url)
       setApiKey(settings.api_key)
       setConfiguredApiKey(settings.api_key)
@@ -94,15 +98,16 @@ export function MainWindow() {
     : connection === 'checking' ? '正在检查后端连接…'
     : connection === 'error' ? connectionError : status
 
-  async function start() {
+  async function start(remoteId?: number) {
     if (savingBackend.current || busy.current || phaseRef.current !== 'idle') return
+    activeRemote.current = remoteId ?? null
     const current = ++epoch.current
     busy.current = true
     changePhase('starting')
     setMic('unready')
     setStatus('等待麦克风输出…')
     try {
-      await commands.start()
+      await commands.start(remoteId)
       if (epoch.current !== current) return
       changePhase('recording')
       setStatus('录音中…')
@@ -145,6 +150,15 @@ export function MainWindow() {
   }
 
   useTauriEvent<MicState>('mic-state', setMic)
+  useTauriEvent<string>('remote-status', setRemoteStatus)
+  useTauriEvent<number>('remote-start-requested', id => {
+    if (!capturingShortcutRef.current && !dictionaryInputActive.current && !historyInputActive.current && !backendInputActive.current) void start(id)
+  })
+  useTauriEvent<number>('remote-stop-requested', id => {
+    if (activeRemote.current !== id) return
+    if (phaseRef.current === 'starting') stopPending.current = true
+    else void stop()
+  })
   useTauriEvent('pill-shown', () => { pillVisible.current = true })
   useTauriEvent('pill-hidden', () => { pillVisible.current = false })
   useEffect(() => {
@@ -158,7 +172,7 @@ export function MainWindow() {
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [])
   useTauriEvent('toggle-requested', () => {
-    if (!capturingShortcutRef.current && !dictionaryInputActive.current && !historyInputActive.current && !backendInputActive.current) void (phaseRef.current === 'recording' ? stop() : start())
+    if (activeRemote.current === null && !capturingShortcutRef.current && !dictionaryInputActive.current && !historyInputActive.current && !backendInputActive.current) void (phaseRef.current === 'recording' ? stop() : start())
   })
   useTauriEvent('stop-requested', () => {
     if (phaseRef.current === 'starting') stopPending.current = true
@@ -176,6 +190,7 @@ export function MainWindow() {
       if (desktop) await commands.shortcut(value)
       setShortcut(value)
       const settings = desktop ? await commands.settings() : null
+      setRemoteStatus(settings?.remote_status ?? '')
       setSettingsWarning(settings?.settings_warning ?? settings?.shortcut_warning ?? '')
       setStatus('快捷键已更新')
     } catch (error) { setStatus(String(error)); throw error }
@@ -230,7 +245,7 @@ export function MainWindow() {
   return <main className="mx-auto flex max-w-xl flex-col gap-5 p-6">
     <header>
       <h1 className="text-xl font-semibold tracking-tight">Open Typeless</h1>
-      <p className="mt-1 text-sm text-muted-foreground">按快捷键开始录音，再按一次完成输入。</p>
+      <p className="mt-1 text-sm text-muted-foreground">{navigator.userAgent.includes('Mac') ? '按键盘快捷键开始 / 完成录音；遥控器语音键按住说话、松开识别。' : '按快捷键开始录音，再按一次完成输入。'}</p>
     </header>
     <Tabs.Root defaultValue="voice" className="space-y-5">
     <Tabs.List aria-label="主导航" className="grid grid-cols-4 rounded-lg bg-muted p-1">
@@ -244,7 +259,7 @@ export function MainWindow() {
       <CardHeader>
         <CardTitle className="text-sm">语音输入</CardTitle>
         <CardDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          {shortcut ? <><ShortcutKeys shortcut={shortcut} /><span>开始 / 完成</span></> : '快捷键加载后显示'}
+          {shortcut ? <><ShortcutKeys shortcut={shortcut} /><span>电脑麦克风 · 开始 / 完成</span></> : '快捷键加载后显示'}
           <span className="inline-flex items-center gap-1"><Kbd>Esc</Kbd>取消</span>
         </CardDescription>
       </CardHeader>
@@ -256,9 +271,10 @@ export function MainWindow() {
           </Button>
           <span className="flex items-center gap-2 text-xs text-muted-foreground">
             <span className={`size-2 rounded-full ${mic === 'ready' ? 'bg-red-500' : 'bg-zinc-400'}`} />
-            麦克风{micLabels[mic]}
+            {activeRemote.current !== null ? '遥控器麦克风' : '电脑麦克风'}{micLabels[mic]}
           </span>
         </div>
+        {remoteStatus && <p role="status" className="text-xs text-muted-foreground">{remoteStatus}</p>}
         <p role="status" className="max-h-24 min-h-5 overflow-y-auto whitespace-pre-wrap break-words text-sm text-muted-foreground">{phase === 'idle' ? idleStatus : status}</p>
       </CardContent>
     </Card>
@@ -270,7 +286,7 @@ export function MainWindow() {
     <section className="space-y-5" aria-labelledby="settings-title">
       <h2 id="settings-title" className="text-base font-semibold">设置</h2>
       <section className="space-y-3" aria-labelledby="shortcut-label">
-        <h2 id="shortcut-label" className="text-sm font-medium">语音输入快捷键</h2>
+        <h2 id="shortcut-label" className="text-sm font-medium">键盘快捷键</h2>
         <div className="flex gap-2">
           <ShortcutRecorder
             value={shortcut}
@@ -279,6 +295,10 @@ export function MainWindow() {
             onCapturingChange={value => { capturingShortcutRef.current = value; setCapturingShortcut(value) }}
           />
         </div>
+        {navigator.userAgent.includes('Mac') && <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">小米遥控器连接后即可使用，无需修改键盘快捷键。按住语音键使用遥控器麦克风，松开后识别；键盘快捷键始终使用电脑默认麦克风。两者共用一个录音会话，录音或识别期间另一个入口不会开始新录音。返回键可取消识别或在空闲输入框中退格，需允许输入监控；键盘 Esc 可取消。F5 保留给遥控器。</p>
+          {remoteStatus && <p role="status" className="text-xs text-muted-foreground">{remoteStatus}</p>}
+        </div>}
       </section>
       <BackendSettingsFields
         serverUrl={serverUrl}
@@ -304,6 +324,7 @@ export function MainWindow() {
       </section>
       {settingsWarning && <p role="status" className="mt-3 text-xs text-destructive">{settingsWarning}</p>}
     </section>
+    <PermissionSettings disabled={phase !== 'idle' || capturingShortcut} />
     {developerOptions && <DeveloperOptions disabled={phase !== 'idle' || capturingShortcut} />}
     </Tabs.Content>
     </Tabs.Root>

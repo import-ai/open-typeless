@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Open Typeless uses Bluetooth to record from your Xiaomi remote microphone while you hold its voice button.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Open Typeless needs microphone access to transcribe your speech.</string>
 </dict>

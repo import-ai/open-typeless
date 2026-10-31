@@ -59,6 +59,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": { "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md" },
     "icon": ["icons/generated/icon.png", "icons/generated/icon.icns", "icons/generated/icon.ico"],
     "macOS": {
       "entitlements": "Entitlements.plist",
