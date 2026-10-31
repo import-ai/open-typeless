@@ -46,7 +46,7 @@ export function PermissionSettings({ disabled }: { disabled: boolean }) {
     <Card>
       <CardHeader>
         <CardTitle>系统权限</CardTitle>
-        <CardDescription>查看授权状态，并为需要的功能授权。基础权限会在 macOS 启动时请求；遥控器权限在启用该模式时请求。</CardDescription>
+        <CardDescription>查看授权状态，并为需要的功能授权。macOS 启动时会请求基础权限，并自动准备遥控器所需的授权。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex items-center justify-between gap-3">
@@ -58,7 +58,7 @@ export function PermissionSettings({ disabled }: { disabled: boolean }) {
             const state = states.find(state => state.id === permission.id)?.status
             return <li key={permission.id} className="space-y-2 py-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <h3 className="font-medium">{permission.title}{permission.remote && <span className="ml-2 text-xs font-normal text-muted-foreground">仅遥控器模式</span>}</h3>
+                <h3 className="font-medium">{permission.title}{permission.remote && <span className="ml-2 text-xs font-normal text-muted-foreground">仅遥控器功能</span>}</h3>
                 <span role="status" className={`inline-flex items-center gap-1 text-xs ${state === 'granted' ? 'text-green-700 dark:text-green-400' : 'text-muted-foreground'}`}>
                   {state === 'granted' && <Check className="size-3.5" />}{state ? labels[state] : '正在检查…'}
                 </span>

@@ -152,7 +152,7 @@ export function MainWindow() {
   useTauriEvent<MicState>('mic-state', setMic)
   useTauriEvent<string>('remote-status', setRemoteStatus)
   useTauriEvent<number>('remote-start-requested', id => {
-    if (shortcut === 'XiaomiRemote' && !capturingShortcutRef.current && !dictionaryInputActive.current && !historyInputActive.current && !backendInputActive.current) void start(id)
+    if (!capturingShortcutRef.current && !dictionaryInputActive.current && !historyInputActive.current && !backendInputActive.current) void start(id)
   })
   useTauriEvent<number>('remote-stop-requested', id => {
     if (activeRemote.current !== id) return
@@ -172,7 +172,7 @@ export function MainWindow() {
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [])
   useTauriEvent('toggle-requested', () => {
-    if (!capturingShortcutRef.current && !dictionaryInputActive.current && !historyInputActive.current && !backendInputActive.current) void (phaseRef.current === 'recording' ? stop() : start())
+    if (activeRemote.current === null && !capturingShortcutRef.current && !dictionaryInputActive.current && !historyInputActive.current && !backendInputActive.current) void (phaseRef.current === 'recording' ? stop() : start())
   })
   useTauriEvent('stop-requested', () => {
     if (phaseRef.current === 'starting') stopPending.current = true
@@ -245,7 +245,7 @@ export function MainWindow() {
   return <main className="mx-auto flex max-w-xl flex-col gap-5 p-6">
     <header>
       <h1 className="text-xl font-semibold tracking-tight">Open Typeless</h1>
-      <p className="mt-1 text-sm text-muted-foreground">{shortcut === 'XiaomiRemote' ? '按住遥控器语音键说话，松开后识别并粘贴。' : '按快捷键开始录音，再按一次完成输入。'}</p>
+      <p className="mt-1 text-sm text-muted-foreground">{navigator.userAgent.includes('Mac') ? '按键盘快捷键开始 / 完成录音；遥控器语音键按住说话、松开识别。' : '按快捷键开始录音，再按一次完成输入。'}</p>
     </header>
     <Tabs.Root defaultValue="voice" className="space-y-5">
     <Tabs.List aria-label="主导航" className="grid grid-cols-4 rounded-lg bg-muted p-1">
@@ -259,22 +259,22 @@ export function MainWindow() {
       <CardHeader>
         <CardTitle className="text-sm">语音输入</CardTitle>
         <CardDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          {shortcut ? <><ShortcutKeys shortcut={shortcut} /><span>{shortcut === 'XiaomiRemote' ? '按住说话 / 松开识别' : '开始 / 完成'}</span></> : '快捷键加载后显示'}
+          {shortcut ? <><ShortcutKeys shortcut={shortcut} /><span>电脑麦克风 · 开始 / 完成</span></> : '快捷键加载后显示'}
           <span className="inline-flex items-center gap-1"><Kbd>Esc</Kbd>取消</span>
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex items-center justify-between gap-3">
-          <Button disabled={!loaded || savingServer || capturingShortcut || phase === 'starting' || phase === 'processing' || (shortcut === 'XiaomiRemote' && phase === 'idle')} onClick={() => { void (phase === 'recording' ? stop() : start()) }}>
+          <Button disabled={!loaded || savingServer || capturingShortcut || phase === 'starting' || phase === 'processing'} onClick={() => { void (phase === 'recording' ? stop() : start()) }}>
             {phase === 'recording' ? <Square /> : <Mic />}
-            {phase === 'recording' ? '停止录音' : phase === 'starting' ? '连接中…' : phase === 'processing' ? '识别中…' : shortcut === 'XiaomiRemote' ? '请按住遥控器语音键' : '开始录音'}
+            {phase === 'recording' ? '停止录音' : phase === 'starting' ? '连接中…' : phase === 'processing' ? '识别中…' : '开始录音'}
           </Button>
-          {(shortcut !== 'XiaomiRemote' || phase !== 'idle') && <span className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span className="flex items-center gap-2 text-xs text-muted-foreground">
             <span className={`size-2 rounded-full ${mic === 'ready' ? 'bg-red-500' : 'bg-zinc-400'}`} />
-            麦克风{micLabels[mic]}
-          </span>}
+            {activeRemote.current !== null ? '遥控器麦克风' : '电脑麦克风'}{micLabels[mic]}
+          </span>
         </div>
-        {shortcut === 'XiaomiRemote' && <p role="status" className="text-xs text-muted-foreground">{remoteStatus}</p>}
+        {remoteStatus && <p role="status" className="text-xs text-muted-foreground">{remoteStatus}</p>}
         <p role="status" className="max-h-24 min-h-5 overflow-y-auto whitespace-pre-wrap break-words text-sm text-muted-foreground">{phase === 'idle' ? idleStatus : status}</p>
       </CardContent>
     </Card>
@@ -286,7 +286,7 @@ export function MainWindow() {
     <section className="space-y-5" aria-labelledby="settings-title">
       <h2 id="settings-title" className="text-base font-semibold">设置</h2>
       <section className="space-y-3" aria-labelledby="shortcut-label">
-        <h2 id="shortcut-label" className="text-sm font-medium">语音输入快捷键</h2>
+        <h2 id="shortcut-label" className="text-sm font-medium">键盘快捷键</h2>
         <div className="flex gap-2">
           <ShortcutRecorder
             value={shortcut}
@@ -296,11 +296,8 @@ export function MainWindow() {
           />
         </div>
         {navigator.userAgent.includes('Mac') && <div className="space-y-2">
-          <Button variant="outline" disabled={(desktop && !loaded) || saving || capturingShortcut || phase !== 'idle'} onClick={() => { void saveShortcut('XiaomiRemote').catch(console.error) }}>
-            使用小米遥控器麦克风
-          </Button>
-          <p className="text-xs text-muted-foreground">按住遥控器语音键录音，松开后识别并粘贴。松开语音键后，立即按返回键可取消识别；空闲时在输入框中退格，需允许输入监控。按住语音键时可用键盘 Esc 取消。重新录入快捷键可切回电脑麦克风。</p>
-          {shortcut === 'XiaomiRemote' && <p role="status" className="text-xs text-muted-foreground">{remoteStatus}</p>}
+          <p className="text-xs text-muted-foreground">小米遥控器连接后即可使用，无需修改键盘快捷键。按住语音键使用遥控器麦克风，松开后识别；键盘快捷键始终使用电脑默认麦克风。两者共用一个录音会话，录音或识别期间另一个入口不会开始新录音。返回键可取消识别或在空闲输入框中退格，需允许输入监控；键盘 Esc 可取消。F5 保留给遥控器。</p>
+          {remoteStatus && <p role="status" className="text-xs text-muted-foreground">{remoteStatus}</p>}
         </div>}
       </section>
       <BackendSettingsFields

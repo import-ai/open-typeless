@@ -5,8 +5,6 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{recording::Audio, TranscriptionRun};
 
-pub const SHORTCUT: &str = "XiaomiRemote";
-
 // IMA ADPCM uses the high nibble first on this remote.
 #[derive(Default)]
 struct Decoder {

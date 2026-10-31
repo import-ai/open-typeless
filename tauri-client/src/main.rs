@@ -335,6 +335,13 @@ fn main() {
             #[cfg(target_os = "macos")]
             remote_microphone::install(app.handle());
             restore_settings(app.handle())?;
+            #[cfg(target_os = "macos")]
+            if let Err(error) = reserve_remote_key(app.handle()).and_then(|()| remote_microphone::configure(true)) {
+                let state = app.state::<AppState>();
+                let mut warning = state.settings_warning.lock().map_err(|e| e.to_string())?;
+                let message = format!("遥控器初始化失败: {error}");
+                *warning = Some(warning.take().map(|previous| format!("{previous}；{message}")).unwrap_or(message));
+            }
             app.manage(HistoryState::new(config_directory(app.handle()).and_then(|path| history::Store::open(&path))));
             setup_tray(app)?;
             apply_presence(app.handle())?;
@@ -578,15 +585,6 @@ fn persist_settings(
 }
 
 fn bind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    if name == remote_microphone::SHORTCUT {
-        reserve_remote_key(app, true)?;
-        if let Err(error) = remote_microphone::configure(true) {
-            let _ = reserve_remote_key(app, false);
-            return Err(error);
-        }
-        return Ok(());
-    }
     if is_modifier(name) {
         modifier_shortcut::configure(Some(name))
     } else {
@@ -595,11 +593,6 @@ fn bind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
 }
 
 fn unbind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    if name == remote_microphone::SHORTCUT {
-        reserve_remote_key(app, false)?;
-        return remote_microphone::configure(false);
-    }
     if is_modifier(name) {
         modifier_shortcut::configure(None)
     } else {
@@ -610,21 +603,20 @@ fn unbind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn reserve_remote_key(app: &AppHandle, enabled: bool) -> Result<(), String> {
-    let key = parse_shortcut("F5")?;
+fn reserve_remote_key(app: &AppHandle) -> Result<(), String> {
+    let key: Shortcut = "F5".parse().map_err(|e| format!("{e}"))?;
     // Consume the remote's F5 so holding its voice key cannot refresh the target app.
     // ATVV events alone start and finish remote recordings.
-    if enabled {
-        app.global_shortcut().on_shortcut(key, |_, _, _| {}).map_err(|e| e.to_string())
-    } else {
-        app.global_shortcut().unregister(key).map_err(|e| e.to_string())
-    }
+    app.global_shortcut().on_shortcut(key, |_, _, _| {}).map_err(|e| e.to_string())
 }
 
 fn parse_shortcut(shortcut_text: &str) -> Result<Shortcut, String> {
-    shortcut_text
-        .parse()
-        .map_err(|e| format!("快捷键格式无效: {e}"))
+    let shortcut: Shortcut = shortcut_text.parse().map_err(|e| format!("快捷键格式无效: {e}"))?;
+    #[cfg(target_os = "macos")]
+    if shortcut == "F5".parse::<Shortcut>().unwrap() {
+        return Err("F5 已保留给遥控器，请选择其他键盘快捷键".into());
+    }
+    Ok(shortcut)
 }
 
 fn bind_shortcut(app: &AppHandle, shortcut: Shortcut) -> Result<(), String> {
@@ -736,10 +728,6 @@ async fn finish_run(app: &AppHandle, id: u64, error: Option<PillError>) {
 async fn start_recording(app: AppHandle, remote_id: Option<u64>) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     if remote_id.is_some() { return Err("遥控器麦克风目前仅支持 macOS".into()); }
-    #[cfg(target_os = "macos")]
-    if (app.state::<AppState>().shortcut.lock().map_err(|e| e.to_string())?.as_str() == remote_microphone::SHORTCUT) != remote_id.is_some() {
-        return Err("请使用所选录音模式的语音键".into());
-    }
     let (run, setup) = {
         let state = app.state::<AppState>();
         let mut active = state.active.lock().map_err(|e| e.to_string())?;
@@ -1764,6 +1752,14 @@ mod settings_tests {
     }
 
     #[test]
+    fn keyboard_shortcuts_exclude_the_remote_voice_key_on_macos() {
+        assert!(parse_shortcut("Control+Shift+K").is_ok());
+        assert!(parse_shortcut("Control+F5").is_ok());
+        assert_eq!(parse_shortcut("F5").is_err(), cfg!(target_os = "macos"));
+        assert!(parse_shortcut("XiaomiRemote").is_err());
+    }
+
+    #[test]
     fn validates_api_keys_without_exposing_them() {
         assert_eq!(normalize_api_key("  test-key  ").unwrap(), "test-key");
         assert_eq!(normalize_api_key("").unwrap(), "");
@@ -1884,9 +1880,10 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     } else {
         shortcut_warning
     };
+    #[cfg(not(target_os = "macos"))]
     let remote_status = None;
     #[cfg(target_os = "macos")]
-    let remote_status = if shortcut == remote_microphone::SHORTCUT { Some(remote_microphone::status()) } else { remote_status };
+    let remote_status = Some(remote_microphone::status());
     let backend = state.backend.lock().map_err(|e| e.to_string())?.clone();
     let presence = *state.presence.lock().map_err(|e| e.to_string())?;
     Ok(Settings {
@@ -1919,11 +1916,7 @@ fn set_shortcut_capture(
         && app
             .get_webview_window("pill")
             .is_some_and(|window| window.is_visible().unwrap_or(false));
-    let remote = cfg!(target_os = "macos") && current.as_str() == "XiaomiRemote";
-    if remote {
-        #[cfg(target_os = "macos")]
-        reserve_remote_key(&app, !capturing)?;
-    } else if escape_cancels_recording {
+    if escape_cancels_recording {
         // Keep cancellation available while editing words during a recording.
     } else if capturing {
         unbind_named_shortcut(&app, &current)?;
@@ -1944,7 +1937,7 @@ fn set_shortcut(
     if shortcut.is_empty() {
         return Err("快捷键不能为空".into());
     }
-    if !is_modifier(&shortcut) && !(cfg!(target_os = "macos") && shortcut == "XiaomiRemote") {
+    if !is_modifier(&shortcut) {
         parse_shortcut(&shortcut)?;
     }
     let mut current = state.shortcut.lock().map_err(|e| e.to_string())?;

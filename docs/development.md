@@ -31,7 +31,7 @@ without starting recording or connecting to a remote. It polls while mounted
 and refreshes on focus. On macOS, startup requests the microphone if its status
 is not determined, then requests Accessibility after the microphone decision.
 Previously denied microphone access is not requested again automatically.
-Remote-only permissions are requested when remote mode is enabled.
+Remote permissions are requested when automatic remote setup starts on macOS.
 
 `src/permissions.rs` exposes a fixed permission enum through `get_permissions`
 and `request_permission`. On macOS, `src/permissions.m` reads AVFoundation,
@@ -60,10 +60,19 @@ clang -Wall -Wextra -Werror -fobjc-arc -framework AppKit -framework AVFoundation
 
 ## Xiaomi remote microphone
 
-The `XiaomiRemote` shortcut mode selects the remote microphone instead of CPAL.
-The existing atomic settings file stores this selection in its `shortcut`
-field. Other modes keep using the default system microphone. Windows builds
-exclude the native bridge and reject this mode.
+On macOS, remote support starts automatically alongside the keyboard shortcut.
+The `shortcut` setting is only a keyboard binding. Legacy `XiaomiRemote` values
+load as the platform default keyboard shortcut without rewriting the file;
+other settings are preserved. Windows excludes the native bridge.
+
+The trigger selects the audio source for each session: a remote ATVV session
+ID selects the remote microphone; keyboard and main-window starts use CPAL's
+default input device. The active-session guard remains shared. Remote events
+while keyboard recording is busy are drained and ignored; keyboard toggle
+requests cannot stop an active remote recording. Remote release only stops its
+matching session. Input editing suspends both activation paths. F5 remains
+reserved on macOS to suppress the remote's synthetic voice-key keyboard event;
+plain F5 is rejected as a keyboard recording shortcut.
 
 On macOS, `src/remote_microphone.m` uses CoreBluetooth for the complete ATVV
 recording lifecycle, independently of HID listeners or Input Monitoring access. It connects
@@ -107,18 +116,18 @@ control is a text field, text area, or combo box with a writable value. Controls
 without editable accessibility support are left alone. The Back listener requires
 Input Monitoring, requested through the native authorization API whenever remote
 mode starts; denial is shown alongside remote status and does not disable
-ATVV recording. Its manager is closed when remote mode is disabled. On the
+ATVV recording. Its manager is closed when remote listening is disabled. On the
 tested firmware, pressing Back while holding the voice key generates no Back
 HID report. Therefore use keyboard Esc during a hold, or release the voice key
 and press Back before recognition completes. Do not infer a simultaneous-button
 cancellation failure from app state alone; inspect the actual HID reports.
 Do not run mi-ao concurrently: both apps would control the same microphone.
 
-For native validation, select the remote mode and test hold/release into a
+For native validation, pair the remote without changing the keyboard shortcut and test hold/release into a
 scratch document, Backspace in an editable field, Back outside text fields,
 a short tap, Back/Esc while holding, Back/Esc during recognition,
-rapid re-press, disconnection during recording, and switching back to a regular
-shortcut. Confirm that the archived WAV contains the remote microphone audio
+rapid re-press, disconnection during recording, and alternating between keyboard and remote recording. Confirm each trigger
+uses the correct microphone and that overlapping triggers never mix sessions. Confirm that the archived WAV contains the remote microphone audio
 and its tail. Protocol/decoder tests run with `cargo test --locked`; frontend
 shortcut tests use the existing Node test command.
 
