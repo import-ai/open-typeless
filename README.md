@@ -23,10 +23,10 @@ Non-release builds include the workflow run ID immediately followed by its attem
 
 ## Set up
 
-1. Open Open Typeless and go to the settings tab.
+1. Open Open Typeless. On macOS, the app requests microphone access and Accessibility permission at startup. Go to the settings tab to see permission status and authorization buttons. Bluetooth and Input Monitoring are requested for automatic Xiaomi remote support on macOS.
 2. Enter the backend URL supplied by your service operator, for example `https://example.com/api/v1`. Press Enter or click elsewhere to save it.
 3. Enter the API key supplied by your service operator. Press Enter or click elsewhere to save it.
-4. On macOS, allow microphone access and grant accessibility permission in **System Settings > Privacy & Security**. Restart the app after granting accessibility permission.
+4. If permission was previously denied, the authorization button opens its page in **System Settings > Privacy & Security**. Enable it there and restart after granting Accessibility or Input Monitoring. On Windows, use the microphone button to open privacy settings and allow desktop apps to access the microphone; its status must be checked there.
 5. Wait for the app to report that it is ready.
 
 Your backend address, API key, and shortcut are saved automatically. Recording is unavailable until the backend is configured, reachable, and accepts your API key.
@@ -45,6 +45,35 @@ Press **Esc** while recording or waiting for recognition to cancel. You can drag
 If recording or recognition fails, the floating indicator turns red and shows an error. If a recording was saved but recognition or history storage failed, the message includes its location for manual recovery. Hover over it for details, then press **Esc** or click its close button to dismiss it. Check the backend settings if it reports a missing or unavailable backend.
 
 To change the shortcut, click the shortcut field in settings, press your preferred key or key combination, then release it to save. Click elsewhere to cancel shortcut capture.
+
+### Xiaomi remote microphone (macOS)
+
+Pair your Xiaomi Bluetooth Voice Remote with macOS. Open Typeless automatically
+connects to it; no shortcut change is needed. Allow Bluetooth access when
+requested and Accessibility access for pasting in **System Settings > Privacy
+& Security**. Remote recording does not require Input Monitoring permission.
+Wait for the remote to report that it is ready, focus the app where you want
+the text, then **hold the voice key
+while speaking and release it to recognize and paste**. Audio comes from the
+remote itself. **Esc** cancels recording or recognition. The remote **Back** key
+also cancels when its button event is available. On the tested firmware, Back
+is not reported while the voice key is held: release the voice key and press
+Back immediately to cancel pending recognition, or use keyboard Esc while holding.
+While idle, **Back** acts as Backspace in the focused editable text field; holding
+it does not repeat deletion. The Back key requires **Input Monitoring** permission
+for Open Typeless. Automatic remote setup requests this permission through macOS;
+restart the app after granting it. Without that permission,
+voice recording and Esc cancellation still work.
+
+This mode is tested with one Xiaomi remote (`2717:32B8`, firmware `2671`),
+using ATVV v1.0 audio on macOS. Recording starts and ends from the remote
+protocol events, independently of keyboard events. F5 is
+reserved by Open Typeless on macOS so the remote cannot refresh the target app;
+choose another keyboard recording shortcut. The keyboard shortcut and the main
+recording button always use the computer’s default microphone; the remote voice
+key always uses the remote microphone. Both inputs remain available, but only
+one recording or recognition session can run at a time. Do not run
+another remote microphone app at the same time.
 
 ## Personal dictionary
 

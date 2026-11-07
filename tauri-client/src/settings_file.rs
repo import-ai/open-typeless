@@ -25,7 +25,13 @@ impl Default for SavedSettings {
 
 pub fn load(path: &Path) -> Result<SavedSettings, String> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("读取设置失败: {e}")),
+        Ok(bytes) => {
+            let mut saved: SavedSettings = serde_json::from_slice(&bytes).map_err(|e| format!("读取设置失败: {e}"))?;
+            if saved.shortcut.trim() == "XiaomiRemote" {
+                saved.shortcut = crate::default_shortcut_name().into();
+            }
+            Ok(saved)
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SavedSettings::default()),
         Err(error) => Err(format!("读取设置失败: {error}")),
     }
@@ -71,6 +77,20 @@ mod tests {
         settings.api_key.clear();
         save(&path, &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);
+    }
+
+    #[test]
+    fn legacy_remote_mode_restores_keyboard_default_without_rewriting_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let original = r#"{"shortcut":"XiaomiRemote","server_url":"http://localhost:8080/api/v1","api_key":"test-key","dock_visible":false}"#;
+        fs::write(&path, original).unwrap();
+        let saved = load(&path).unwrap();
+        assert_eq!(saved.shortcut, crate::default_shortcut_name());
+        assert_eq!(saved.server_url, "http://localhost:8080/api/v1");
+        assert_eq!(saved.api_key, "test-key");
+        assert!(!saved.dock_visible);
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
     }
 
     #[test]

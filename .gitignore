@@ -30,6 +30,7 @@ coverage.html
 target/
 **/target/
 tauri-client/icons/generated/
+tauri-client/gen/schemas/
 
 # Node.js / frontend
 node_modules/

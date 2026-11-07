@@ -34,8 +34,9 @@ func TestStreamingAudioArrivesBeforeUploadEnds(t *testing.T) {
 		fmt.Fprint(w, "data: {\"type\":\"transcript.text.delta\",\"delta\":\"语音\"}\n\n")
 		w.(http.Flusher).Flush()
 		tail, err := io.ReadAll(r.Body)
-		if err != nil || !bytes.Equal(tail, []byte{3, 0, 4, 0}) {
-			t.Error("missing final PCM")
+		expected := append([]byte{3, 0, 4, 0}, make([]byte, 16000*2)...)
+		if err != nil || !bytes.Equal(tail, expected) {
+			t.Error("missing final PCM or trailing inference silence")
 			return
 		}
 		fmt.Fprint(w, "data: {\"type\":\"transcript.text.done\",\"text\":\"语音 OAuth\"}\n\ndata: [DONE]\n\n")
@@ -84,6 +85,9 @@ func TestStreamingAudioArrivesBeforeUploadEnds(t *testing.T) {
 	var final streamEvent
 	if err := decoder.Decode(&final); err != nil || final.Type != "final" || final.Result == nil || final.Result.RawText != "语音 OAuth" || final.Result.PolishedText != "Polished final." {
 		t.Fatalf("invalid final event: %+v %v", final, err)
+	}
+	if final.Result.DurationMS != 0 {
+		t.Fatalf("inference silence changed the recorded duration: %d", final.Result.DurationMS)
 	}
 	llm.Close()
 	if polishCalls != 1 {

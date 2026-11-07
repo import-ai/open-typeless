@@ -24,6 +24,122 @@ npm run tauri build # Desktop build; builds the frontend automatically
 
 Add shadcn components by running `npx shadcn@latest add <component>` from `tauri-client/`. Component source lives in `frontend/src/components/ui/`. See the [frontend development guide](frontend.md) for integration rationale and directory conventions.
 
+## Permission settings
+
+The permissions panel below the main window's settings reads permission state
+without starting recording or connecting to a remote. It polls while mounted
+and refreshes on focus. On macOS, startup requests the microphone if its status
+is not determined, then requests Accessibility after the microphone decision.
+Previously denied microphone access is not requested again automatically.
+Remote permissions are requested when automatic remote setup starts on macOS.
+
+`src/permissions.rs` exposes a fixed permission enum through `get_permissions`
+and `request_permission`. On macOS, `src/permissions.m` reads AVFoundation,
+Accessibility, CoreBluetooth, and IOHID authorization state. Requests run on
+the main thread and use the native prompt or the corresponding System Settings
+page. Reading status never requests access. Restricted permissions are shown
+as managed by system policy. On Windows, the microphone action opens
+`ms-settings:privacy-microphone`; status is unknown because desktop-app access
+is managed in Windows settings. The macOS-only permission rows are not applicable.
+Browser previews do not query or change system permissions.
+
+Validate native permission flows using a bundled app: check an unrequested
+permission, grant/deny it, return from System Settings, and reopen the settings tab.
+Previously denied permissions may not prompt again. Do not reset the user's
+permission database as part of routine tests.
+
+The native authorization regression uses mocked system APIs, so it does not
+change real permissions:
+
+```sh
+clang -Wall -Wextra -Werror -fobjc-arc -framework AppKit -framework AVFoundation \
+  -framework CoreBluetooth -framework ApplicationServices -framework IOKit \
+  tests/permissions.test.m -o /tmp/open-typeless-permissions-test
+/tmp/open-typeless-permissions-test
+```
+
+## Xiaomi remote microphone
+
+On macOS, remote support starts automatically alongside the keyboard shortcut.
+The `shortcut` setting is only a keyboard binding. Legacy `XiaomiRemote` values
+load as the platform default keyboard shortcut without rewriting the file;
+other settings are preserved. Windows excludes the native bridge.
+
+The trigger selects the audio source for each session: a remote ATVV session
+ID selects the remote microphone; keyboard and main-window starts use CPAL's
+default input device. The active-session guard remains shared. Remote events
+while keyboard recording is busy are drained and ignored; keyboard toggle
+requests cannot stop an active remote recording. Remote release only stops its
+matching session. Input editing suspends both activation paths. F5 remains
+reserved on macOS to suppress the remote's synthetic voice-key keyboard event;
+plain F5 is rejected as a keyboard recording shortcut.
+
+On macOS, `src/remote_microphone.m` uses CoreBluetooth for the complete ATVV
+recording lifecycle, independently of HID listeners or Input Monitoring access. It connects
+to the paired device named `小米蓝牙语音遥控器`, subscribes to audio and control
+notifications, and negotiates ATVV v1.0. The Rust module validates capabilities
+and decodes 120-byte, 16 kHz IMA ADPCM frames. The protocol reference is
+[mi-ao](https://github.com/fanxeon/mi-ao); attribution and its MIT license are in
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). Only this device/format is
+supported; unknown protocols and malformed audio are rejected.
+
+`START_SEARCH` requests `MIC_OPEN` only while idle. `AUDIO_START` creates a
+recording session; `AUDIO_STOP` supplies its EOF and triggers recognition. A
+firmware-initiated `AUDIO_START` also works without `START_SEARCH`. Duplicate
+requests do not reopen the microphone or reset its decoder. Decoded audio is
+buffered until backend health checks complete; if the remote stops first, the
+entire completed buffer is still attached to the matching recognition session.
+
+Each ATVV session has an ID. Late stops and cleanup cannot affect another
+session. New streams while busy or editing are closed and ignored; cancelled
+streams are drained without accepting more audio. Cancellation and failed
+backend checks discard the matching pending buffer and close the microphone.
+The backend URL/key and dictionary snapshots, health checks, trimmed PCM, WAV
+fallback, size/duration limits, history, cancellation checks and paste path are
+shared with CPAL. The remote WAV size also caps total audio at four minutes,
+including the head buffered during health checks. On manual stop, capture waits
+for the queued audio through `AUDIO_STOP` before publishing EOF. Connection
+failures and timeouts surface through remote status and recording errors or
+warnings. The bridge reconnects after disconnection.
+
+The macOS build compiles the Objective-C bridge with the existing platform
+toolchain through `cc`. The app bundle declares Bluetooth usage and the
+Bluetooth entitlement. Real-device checks require a bundled app, Bluetooth
+permission, and Accessibility permission for pasting. The ATVV audio transport
+itself does not require Input Monitoring.
+A separate, non-seizing IOHIDManager listens only to vendor `2717`, product
+`32B8`, keyboard usage `07:F1` (Back). It emits once per press, ignores repeats,
+and resets the held state on device removal. Back discards pending ATVV audio
+and uses the existing cancellation path during startup, recording, or recognition.
+While idle it sends Backspace through Enigo only when the focused accessibility
+control is a text field, text area, or combo box with a writable value. Controls
+without editable accessibility support are left alone. The Back listener requires
+Input Monitoring, requested through the native authorization API whenever remote
+mode starts; denial is shown alongside remote status and does not disable
+ATVV recording. Its manager is closed when remote listening is disabled. On the
+tested firmware, pressing Back while holding the voice key generates no Back
+HID report. Therefore use keyboard Esc during a hold, or release the voice key
+and press Back before recognition completes. Do not infer a simultaneous-button
+cancellation failure from app state alone; inspect the actual HID reports.
+Do not run mi-ao concurrently: both apps would control the same microphone.
+
+For native validation, pair the remote without changing the keyboard shortcut and test hold/release into a
+scratch document, Backspace in an editable field, Back outside text fields,
+a short tap, Back/Esc while holding, Back/Esc during recognition,
+rapid re-press, disconnection during recording, and alternating between keyboard and remote recording. Confirm each trigger
+uses the correct microphone and that overlapping triggers never mix sessions. Confirm that the archived WAV contains the remote microphone audio
+and its tail. Protocol/decoder tests run with `cargo test --locked`; frontend
+shortcut tests use the existing Node test command.
+
+The native ATVV start/stop regression runs without Bluetooth hardware on macOS:
+
+```sh
+clang -Wall -Wextra -Werror -fobjc-arc -framework Foundation -framework CoreBluetooth \
+  -framework IOKit -framework ApplicationServices \
+  tests/remote-microphone.test.m -o /tmp/open-typeless-remote-test
+/tmp/open-typeless-remote-test
+```
+
 ## Backend authentication
 
 The Go Business Server requires `BACKEND_API_KEY`; startup fails if it is empty
@@ -141,6 +257,10 @@ header and are not forwarded to ASR. Redirects are rejected.
 
 The upload has a 15-second idle deadline and the stream a five-minute lifetime.
 After EOF, ASR has 40 seconds; polishing retains its separate `LLM_TIMEOUT`.
+The server appends one second of silent PCM to the audio.cpp request after a
+valid upload finishes. This flushes final words that the current streaming
+model can omit at immediate EOF. The padding is inference-only: it does not
+change the archived WAV, recorded duration, or client upload size limit.
 The desktop waits up to 60 seconds after stopping before falling back; the
 fallback HTTP request also has a 60-second timeout. Health advertises
 `limits.max_audio_bytes`. Capture is bounded by the smaller of that limit and

@@ -4,6 +4,10 @@ mod recording;
 mod modifier_shortcut;
 mod settings_file;
 mod streaming;
+mod permissions;
+use permissions::{get_permissions, request_permission};
+#[cfg(target_os = "macos")]
+mod remote_microphone;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use modifier_shortcut::is_modifier;
@@ -63,6 +67,7 @@ struct TranscriptionRun {
     transcribing: AtomicBool,
     finalizing: AtomicBool,
     hotwords: String,
+    remote_id: Option<u64>,
     backend: BackendSettings,
     cancelled: AtomicBool,
     notification: tokio::sync::Notify,
@@ -83,6 +88,7 @@ impl TranscriptionRun {
             transcribing: AtomicBool::new(false),
             finalizing: AtomicBool::new(false),
             hotwords: String::new(),
+            remote_id: None,
             backend: BackendSettings::default(),
             cancelled: AtomicBool::new(false),
             notification: tokio::sync::Notify::new(),
@@ -178,6 +184,7 @@ struct Settings {
     server_url: String,
     api_key: String,
     shortcut_warning: Option<String>,
+    remote_status: Option<String>,
     developer_options: bool,
     settings_warning: Option<String>,
     tray_visible: bool,
@@ -325,11 +332,21 @@ fn main() {
             if let Err(error) = modifier_shortcut::install(app.handle()) {
                 eprintln!("{error}");
             }
+            #[cfg(target_os = "macos")]
+            remote_microphone::install(app.handle());
             restore_settings(app.handle())?;
+            #[cfg(target_os = "macos")]
+            if let Err(error) = reserve_remote_key(app.handle()).and_then(|()| remote_microphone::configure(true)) {
+                let state = app.state::<AppState>();
+                let mut warning = state.settings_warning.lock().map_err(|e| e.to_string())?;
+                let message = format!("遥控器初始化失败: {error}");
+                *warning = Some(warning.take().map(|previous| format!("{previous}；{message}")).unwrap_or(message));
+            }
             app.manage(HistoryState::new(config_directory(app.handle()).and_then(|path| history::Store::open(&path))));
             setup_tray(app)?;
             apply_presence(app.handle())?;
             position_pill(app.handle())?;
+            permissions::request_startup_permissions(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -370,6 +387,8 @@ fn main() {
             set_presence_settings,
             check_server_connection,
             get_settings,
+            get_permissions,
+            request_permission,
             get_dictionary,
             save_dictionary_entry,
             delete_dictionary_entries,
@@ -583,10 +602,21 @@ fn unbind_named_shortcut(app: &AppHandle, name: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn reserve_remote_key(app: &AppHandle) -> Result<(), String> {
+    let key: Shortcut = "F5".parse().map_err(|e| format!("{e}"))?;
+    // Consume the remote's F5 so holding its voice key cannot refresh the target app.
+    // ATVV events alone start and finish remote recordings.
+    app.global_shortcut().on_shortcut(key, |_, _, _| {}).map_err(|e| e.to_string())
+}
+
 fn parse_shortcut(shortcut_text: &str) -> Result<Shortcut, String> {
-    shortcut_text
-        .parse()
-        .map_err(|e| format!("快捷键格式无效: {e}"))
+    let shortcut: Shortcut = shortcut_text.parse().map_err(|e| format!("快捷键格式无效: {e}"))?;
+    #[cfg(target_os = "macos")]
+    if shortcut == "F5".parse::<Shortcut>().unwrap() {
+        return Err("F5 已保留给遥控器，请选择其他键盘快捷键".into());
+    }
+    Ok(shortcut)
 }
 
 fn bind_shortcut(app: &AppHandle, shortcut: Shortcut) -> Result<(), String> {
@@ -695,14 +725,20 @@ async fn finish_run(app: &AppHandle, id: u64, error: Option<PillError>) {
 }
 
 #[tauri::command]
-async fn start_recording(app: AppHandle) -> Result<(), String> {
+async fn start_recording(app: AppHandle, remote_id: Option<u64>) -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    if remote_id.is_some() { return Err("遥控器麦克风目前仅支持 macOS".into()); }
     let (run, setup) = {
         let state = app.state::<AppState>();
         let mut active = state.active.lock().map_err(|e| e.to_string())?;
         if active.is_some() {
             return Err("已有录音或识别进行中".into());
         }
+        // Back can discard a remote stream before its frontend start request arrives.
+        #[cfg(target_os = "macos")]
+        if let Some(id) = remote_id { remote_microphone::check(id)?; }
         let mut run = TranscriptionRun::new(state.next_run.fetch_add(1, Ordering::SeqCst));
+        run.remote_id = remote_id;
         run.backend = state.backend.lock().map_err(|e| e.to_string())?.clone();
         let setup = (|| {
             let _guard = state.dictionary_lock.lock().map_err(|e| e.to_string())?;
@@ -750,6 +786,7 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
                 &worker_app.state::<AppState>(),
                 worker_app.clone(),
                 worker_run,
+                remote_id,
             )
         })
         .await
@@ -757,13 +794,15 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
     }
     .await;
     if let Err(error) = &result {
+        #[cfg(target_os = "macos")]
+        if let Some(id) = remote_id { remote_microphone::discard(id); }
         finish_run(&app, run.id, Some(PillError::new(error_label, error))).await;
     }
     result
 }
-fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> Result<(), String> {
+fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>, remote_id: Option<u64>) -> Result<(), String> {
     let (ready_tx, ready_rx) = mpsc::channel();
-    let (capture_ready_tx, capture_ready_rx) = mpsc::channel();
+    let (capture_ready_tx, capture_ready_rx) = mpsc::channel::<Result<(), String>>();
     let (stop_tx, stop_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
     *run.capture_stop.lock().map_err(|e| e.to_string())? = Some(stop_tx.clone());
@@ -771,19 +810,18 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
     std::thread::spawn(move || {
         let result = (|| -> Result<(), String> {
             capture_run.check()?;
-            let host = cpal::default_host();
-            let device = match host.default_input_device() {
-                Some(device) => device,
-                None => {
-                    let _ = app.emit("mic-state", "disconnected");
-                    return Err("没有可用的麦克风".into());
-                }
+            let device = if remote_id.is_some() { None } else {
+                Some(cpal::default_host().default_input_device().ok_or("没有可用的麦克风")?)
             };
-            let supported = device.default_input_config().map_err(|e| e.to_string())?;
-            let sample_rate = supported.sample_rate().0;
-            let channels = supported.channels();
-            let samples = Arc::new(Mutex::new(recording::Audio::new(sample_rate, channels,
-                capture_run.max_audio_bytes.load(Ordering::SeqCst) as usize)?));
+            let supported = device.as_ref().map(|device| device.default_input_config())
+                .transpose().map_err(|e| e.to_string())?;
+            let sample_rate = supported.as_ref().map(|config| config.sample_rate().0).unwrap_or(16000);
+            let channels = supported.as_ref().map(|config| config.channels()).unwrap_or(1);
+            let max_bytes = capture_run.max_audio_bytes.load(Ordering::SeqCst) as usize;
+            let max_bytes = if remote_id.is_some() {
+                max_bytes.min(44 + sample_rate as usize * channels as usize * 2 * recording::MAX_RECORDING_SECONDS as usize)
+            } else { max_bytes };
+            let samples = Arc::new(Mutex::new(recording::Audio::new(sample_rate, channels, max_bytes)?));
             let sink = samples.clone();
             let capture_ready_once = Arc::new(AtomicBool::new(false));
             let error_events = app.clone();
@@ -795,7 +833,8 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
                     let _ = error_events.emit("mic-state", "disconnected");
                 }
             };
-            let stream = match supported.sample_format() {
+            let stream = if let (Some(device), Some(supported)) = (device, supported) {
+                Some(match supported.sample_format() {
                 cpal::SampleFormat::I16 => {
                     let ready = capture_ready_tx.clone();
                     let once = capture_ready_once.clone();
@@ -814,7 +853,7 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
                             if d.iter().any(|sample| *sample != 0)
                                 && !once.swap(true, Ordering::AcqRel)
                             {
-                                let _ = ready.send(());
+                                let _ = ready.send(Ok(()));
                                 let _ = events.emit("mic-state", "ready");
                             }
                             sink.lock().unwrap().push(d.iter().copied())
@@ -844,7 +883,7 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
                             if d.iter().any(|sample| *sample != 32768)
                                 && !once.swap(true, Ordering::AcqRel)
                             {
-                                let _ = ready.send(());
+                                let _ = ready.send(Ok(()));
                                 let _ = events.emit("mic-state", "ready");
                             }
                             sink.lock()
@@ -872,7 +911,7 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
                             if d.iter().any(|sample| *sample != 0.0)
                                 && !once.swap(true, Ordering::AcqRel)
                             {
-                                let _ = ready.send(());
+                                let _ = ready.send(Ok(()));
                                 let _ = events.emit("mic-state", "ready");
                             }
                             sink.lock()
@@ -885,19 +924,25 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
                 }
                 _ => return Err("不支持的麦克风采样格式".into()),
             }
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?)
+            } else { None };
             capture_run.check()?;
             let _ = app.emit("mic-state", "unready");
-            stream.play().map_err(|e| e.to_string())?;
+            #[cfg(target_os = "macos")]
+            let remote_capture = remote_id.map(|id| remote_microphone::Capture::open(
+                id, capture_run.clone(), samples.clone(), capture_ready_tx.clone(),
+            )).transpose()?;
+            if let Some(stream) = stream.as_ref() { stream.play().map_err(|e| e.to_string())?; }
             let deadline = Instant::now() + Duration::from_secs(3);
             loop {
                 capture_run.check()?;
                 match capture_ready_rx.recv_timeout(Duration::from_millis(20)) {
-                    Ok(()) => break,
+                    Ok(result) => { result?; break; },
                     Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
                     _ => return Err("麦克风未及时就绪，请检查麦克风权限和输入设备".into()),
                 }
             }
+            let _ = app.emit("mic-state", "ready");
             ready_tx.send(Ok(())).map_err(|e| e.to_string())?;
             let mut upload = None;
             let streaming = capture_run.streaming_enabled.load(Ordering::SeqCst);
@@ -931,8 +976,14 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>) -> 
                 }
             }
             // Retain the queued microphone tail before publishing either transport's EOF.
-            std::thread::sleep(Duration::from_millis(200));
+            #[cfg(target_os = "macos")]
+            if let Some(capture) = remote_capture.as_ref() {
+                if let Err(error) = capture.finish() { capture_run.warnings.lock().unwrap().push(error); }
+            }
+            if stream.is_some() { std::thread::sleep(Duration::from_millis(200)); }
             drop(stream);
+            #[cfg(target_os = "macos")]
+            drop(remote_capture);
             capture_run.check()?;
             let mut captured = std::mem::replace(
                 &mut *samples.lock().map_err(|e| e.to_string())?,
@@ -1085,6 +1136,8 @@ fn cancel_active(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
     if let Some(run) = active.take() {
+        #[cfg(target_os = "macos")]
+        if let Some(id) = run.remote_id { remote_microphone::discard(id); }
         let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
         if recorder
             .as_ref()
@@ -1699,6 +1752,14 @@ mod settings_tests {
     }
 
     #[test]
+    fn keyboard_shortcuts_exclude_the_remote_voice_key_on_macos() {
+        assert!(parse_shortcut("Control+Shift+K").is_ok());
+        assert!(parse_shortcut("Control+F5").is_ok());
+        assert_eq!(parse_shortcut("F5").is_err(), cfg!(target_os = "macos"));
+        assert!(parse_shortcut("XiaomiRemote").is_err());
+    }
+
+    #[test]
     fn validates_api_keys_without_exposing_them() {
         assert_eq!(normalize_api_key("  test-key  ").unwrap(), "test-key");
         assert_eq!(normalize_api_key("").unwrap(), "");
@@ -1819,12 +1880,17 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     } else {
         shortcut_warning
     };
+    #[cfg(not(target_os = "macos"))]
+    let remote_status = None;
+    #[cfg(target_os = "macos")]
+    let remote_status = Some(remote_microphone::status());
     let backend = state.backend.lock().map_err(|e| e.to_string())?.clone();
     let presence = *state.presence.lock().map_err(|e| e.to_string())?;
     Ok(Settings {
         settings_warning,
         developer_options: developer_options_enabled(),
         shortcut_warning,
+        remote_status,
         shortcut,
         server_url: backend.server_url,
         api_key: backend.api_key,
