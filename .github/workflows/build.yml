@@ -22,13 +22,13 @@ jobs:
       matrix:
         include:
           - name: macOS Apple Silicon
-            runner: macos-14
+            runner: macos-15
             target: aarch64-apple-darwin
             bundles: dmg
             arch: arm64
             extension: dmg
           - name: macOS Intel
-            runner: macos-14
+            runner: macos-15
             target: x86_64-apple-darwin
             bundles: dmg
             arch: amd64
