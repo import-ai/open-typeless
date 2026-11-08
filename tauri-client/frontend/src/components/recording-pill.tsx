@@ -1,21 +1,20 @@
 import { Check, LoaderCircle, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { previewPillError, type PillError, type PillState } from '@/lib/desktop'
+import { waveformAmplitude } from '@/lib/waveform'
 
-const heights = [9, 11, 15, 19, 23, 29, 34, 26, 19, 13, 10]
 interface Props {
   state: PillState
   error?: PillError
-  level?: number
+  levels: readonly number[]
   onCancel?: () => void
   onDone?: () => void
   onDrag?: () => void
 }
 
 // Both the desktop overlay and debug gallery render this exact component.
-export function RecordingPill({ state, error = previewPillError, level = 0, onCancel, onDone, onDrag }: Props) {
+export function RecordingPill({ state, error = previewPillError, levels, onCancel, onDone, onDrag }: Props) {
   const processing = state === 'processing'
-  const amplitude = Math.max(0, Math.min(1, level * 12))
   // Keep both shapes at fixed sizes. Resizing one composited surface from the
   // spinner back to the capsule leaves stale clipping in macOS WKWebView.
   return <div className="pill-shapes">
@@ -29,12 +28,11 @@ export function RecordingPill({ state, error = previewPillError, level = 0, onCa
       {state === 'error' ? <span className="pill-error pill-draggable" role="alert" aria-label={error.message} title={error.message} onMouseDown={event => { if (event.button === 0) onDrag?.() }}>
         {error.label}
       </span> : <>
-      <svg className="pill-waveform pill-draggable" onMouseDown={event => { if (event.button === 0) onDrag?.() }} viewBox="0 0 100 40" aria-label={state === 'ready' ? '录音波形' : '平线'} role="img">
-        {state === 'ready' ? heights.map((height, index) => {
-          const h = Math.max(2, height * amplitude)
-          return <rect key={index} x={12 + index * 7} y={(40 - h) / 2} width="3" height={h} fill="currentColor" />
-        }) : <path d="M12 20H85" stroke="currentColor" strokeWidth="1.5" />}
-      </svg>
+      <div className="pill-waveform pill-draggable" onMouseDown={event => { if (event.button === 0) onDrag?.() }} aria-label={state === 'ready' ? '录音波形' : '平线'} role="img">
+        {state === 'ready' ? levels.map((level, index) => (
+          <span key={index} className="pill-waveform-bar" style={{ height: 3 + 15 * waveformAmplitude(level) }} />
+        )) : <span className="pill-waveform-flat" />}
+      </div>
       {state === 'ready' ? (
         <Button variant="ghost" size="icon" className="pill-done" aria-label="完成录音" onClick={onDone}>
           <Check aria-hidden="true" />

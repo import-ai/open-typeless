@@ -35,7 +35,12 @@ html[data-window="pill"] body, html[data-window="pill-debug"] body {
 .pill-waiting { display: grid; place-items: center; justify-self: center; width: 20px; height: 20px; }
 .recording-pill button:hover { filter: brightness(1.12); }
 .recording-pill button:active { transform: scale(.94); }
-.pill-waveform { display: block; width: 100%; height: 24px; }
+.pill-waveform { display: flex; align-items: center; justify-content: center; gap: 2px; height: 24px; }
+.pill-waveform-bar { width: 3px; border-radius: 999px; background: currentColor; transition: height 90ms ease-out; }
+.pill-waveform-flat { width: 46px; height: 1px; border-radius: 999px; background: currentColor; }
+@media (prefers-reduced-motion: reduce) {
+  .pill-waveform-bar { transition: none; }
+}
 .recording-pill[data-state="disconnected"] .pill-waveform { color: #666; }
 .recording-pill[data-state="unready"] .pill-waveform { color: #999; }
 .recording-pill[data-state="error"] { grid-template-columns: 32px minmax(0, 1fr); background: #450a0a; color: #fecaca; }

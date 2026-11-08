@@ -39,7 +39,7 @@ tauri-client/
 - Use React StrictMode. Clean up asynchronous event subscriptions on unmount and hot reload, including subscriptions that complete after unmounting.
 - Mount only the components for the main, production pill, or debug window as appropriate. Do not use CSS to hide entire DOM trees belonging to other windows.
 - Apply transparent backgrounds only to pill windows so the shadcn body background does not cover the desktop.
-- Debug previews drive the same pill component with simulated volume and do not record, upload, or paste.
+- The recording pill draws nine fixed bars from the latest complete audio snapshot. Each bar shows the RMS level of its own roughly 5 ms slice on a logarithmic scale. Debug previews drive the same display with simulated levels and do not record, upload, or paste.
 - Browser previews display the UI, but recording must run inside Tauri.
 - Record dependency versions in `package-lock.json` and use `npm ci` for reproducible installation.
 

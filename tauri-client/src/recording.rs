@@ -2,6 +2,7 @@ use std::{io::Cursor, path::Path};
 
 pub const MAX_AUDIO_BYTES: usize = 12 << 20;
 pub const MAX_RECORDING_SECONDS: u64 = 240;
+const WAVEFORM_BARS: usize = 9;
 
 // One bounded source for live PCM, the fallback WAV, and archived audio.
 pub struct Audio {
@@ -39,6 +40,20 @@ impl Audio {
 
     pub fn full(&self) -> bool {
         self.samples.len() == self.max_samples
+    }
+
+    pub fn waveform(&self) -> [f64; WAVEFORM_BARS] {
+        let frames_per_bar = (self.sample_rate as usize / 200).max(1);
+        let frames_per_snapshot = frames_per_bar * WAVEFORM_BARS;
+        let complete_frames = self.samples.len() / self.channels;
+        let end = complete_frames / frames_per_snapshot * frames_per_snapshot;
+        if end == 0 {
+            return [0.0; WAVEFORM_BARS];
+        }
+        std::array::from_fn(|index| {
+            let start = end - frames_per_snapshot + index * frames_per_bar;
+            crate::rms(&self.samples, self.channels, start, start + frames_per_bar) / 32768.0
+        })
     }
 
     fn detect_speech(&mut self, finishing: bool) {
@@ -119,6 +134,29 @@ pub fn save(path: &Path, data: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waveform_uses_independent_bars_and_replaces_complete_snapshots() {
+        let mut audio = Audio::new(16_000, 2, MAX_AUDIO_BYTES).unwrap();
+        let silent = [0.0; WAVEFORM_BARS];
+        let samples_per_bar = 80 * 2;
+        for bar in 0..WAVEFORM_BARS - 1 {
+            let sample = if bar == 1 { -16_384 } else { 0 };
+            audio.push(std::iter::repeat_n(sample, samples_per_bar));
+        }
+        assert_eq!(audio.waveform(), silent);
+        audio.push(std::iter::repeat_n(0, samples_per_bar));
+        let mut first = silent;
+        first[1] = 0.5;
+        assert_eq!(audio.waveform(), first);
+
+        audio.push(std::iter::repeat_n(0, samples_per_bar * (WAVEFORM_BARS - 1)));
+        assert_eq!(audio.waveform(), first);
+        audio.push(std::iter::repeat_n(8192, samples_per_bar));
+        let mut second = silent;
+        second[WAVEFORM_BARS - 1] = 0.25;
+        assert_eq!(audio.waveform(), second);
+    }
 
     #[test]
     fn live_wav_and_archive_have_identical_samples_including_tail() {
