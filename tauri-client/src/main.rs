@@ -846,10 +846,6 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>, rem
                             if callback_run.check().is_err() {
                                 return;
                             }
-                            let level = d.iter().map(|sample| (*sample as f64).abs()).sum::<f64>()
-                                / (d.len().max(1) as f64)
-                                / 32768.0;
-                            let _ = events.emit("mic-level", level.min(1.0));
                             if d.iter().any(|sample| *sample != 0)
                                 && !once.swap(true, Ordering::AcqRel)
                             {
@@ -873,13 +869,6 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>, rem
                             if callback_run.check().is_err() {
                                 return;
                             }
-                            let level = d
-                                .iter()
-                                .map(|sample| ((*sample as i32 - 32768).abs()) as f64)
-                                .sum::<f64>()
-                                / (d.len().max(1) as f64)
-                                / 32768.0;
-                            let _ = events.emit("mic-level", level.min(1.0));
                             if d.iter().any(|sample| *sample != 32768)
                                 && !once.swap(true, Ordering::AcqRel)
                             {
@@ -905,9 +894,6 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>, rem
                             if callback_run.check().is_err() {
                                 return;
                             }
-                            let level = d.iter().map(|sample| sample.abs() as f64).sum::<f64>()
-                                / (d.len().max(1) as f64);
-                            let _ = events.emit("mic-level", level.min(1.0));
                             if d.iter().any(|sample| *sample != 0.0)
                                 && !once.swap(true, Ordering::AcqRel)
                             {
@@ -948,10 +934,13 @@ fn start_inner(state: &AppState, app: AppHandle, run: Arc<TranscriptionRun>, rem
             let streaming = capture_run.streaming_enabled.load(Ordering::SeqCst);
             let deadline = Instant::now() + Duration::from_secs(recording::MAX_RECORDING_SECONDS);
             loop {
-                let (chunk, full) = {
+                let (chunk, full, waveform) = {
                     let mut captured = samples.lock().map_err(|e| e.to_string())?;
-                    (if streaming { captured.pending(false) } else { Vec::new() }, captured.full())
+                    (if streaming { captured.pending(false) } else { Vec::new() }, captured.full(), captured.waveform())
                 };
+                if capture_run.check().is_ok() {
+                    let _ = app.emit_to("pill", "mic-waveform", waveform);
+                }
                 // Do not open an idle stream before speech; all transports share the same pre-roll.
                 if !chunk.is_empty() && streaming {
                     upload.get_or_insert_with(|| streaming::start(capture_run.clone(), sample_rate, channels)).send(&chunk);

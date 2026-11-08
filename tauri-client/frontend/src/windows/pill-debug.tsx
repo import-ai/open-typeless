@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
 import { RecordingPill } from '@/components/recording-pill'
+import { useWaveform } from '@/hooks/use-waveform'
 import type { PillState } from '@/lib/desktop'
 
 const states: { state: PillState; label: string }[] = [
@@ -10,15 +10,11 @@ const states: { state: PillState; label: string }[] = [
   { state: 'error', label: '报错' },
 ]
 export function PillDebug() {
-  const [level, setLevel] = useState(0.06)
-  useEffect(() => {
-    const timer = setInterval(() => setLevel(0.04 + Math.random() * 0.04), 180)
-    return () => clearInterval(timer)
-  }, [])
+  const { levels } = useWaveform(true, true)
   return <main className="pill-debug-gallery" aria-label="Pill 状态预览">
     {states.map(({ state, label }) => <div className="pill-debug-row" key={state}>
       <p className="pill-debug-label">{label}</p>
-      <div className="pill-stage"><RecordingPill state={state} level={level} /></div>
+      <div className="pill-stage"><RecordingPill state={state} levels={levels} /></div>
     </div>)}
 
   </main>

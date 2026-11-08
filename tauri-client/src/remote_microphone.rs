@@ -69,24 +69,19 @@ struct Session {
     sink: Option<Sink>,
 }
 impl Session {
-    fn feed(&mut self, data: &[u8]) -> Result<f64, String> {
+    fn feed(&mut self, data: &[u8]) -> Result<(), String> {
         if self.ended
             || self
                 .sink
                 .as_ref()
                 .is_some_and(|sink| sink.run.check().is_err())
         {
-            return Ok(0.0);
+            return Ok(());
         }
         if data.len() != 120 {
             return Err("遥控器音频帧长度无效".into());
         }
         let samples = self.decoder.decode(data);
-        let level = samples
-            .iter()
-            .map(|sample| (*sample as f64).abs())
-            .sum::<f64>()
-            / (samples.len() as f64 * 32768.0);
         if let Some(sink) = self.sink.as_ref() {
             sink.audio
                 .lock()
@@ -99,7 +94,7 @@ impl Session {
         } else {
             return Err("遥控器音频缓冲已满，请松开语音键后重试".into());
         }
-        Ok(level)
+        Ok(())
     }
 
     fn finish(&mut self) -> bool {
@@ -397,11 +392,8 @@ extern "C" fn receive(kind: u32, bytes: *const u8, length: usize) {
         },
         4 if !remote.sessions.ignoring => {
             if let Some(session) = remote.sessions.current.as_mut() {
-                match session.feed(data) {
-                    Ok(level) => {
-                        let _ = app.emit("mic-level", level);
-                    }
-                    Err(error) => failure(&mut remote, error),
+                if let Err(error) = session.feed(data) {
+                    failure(&mut remote, error);
                 }
             }
         }
