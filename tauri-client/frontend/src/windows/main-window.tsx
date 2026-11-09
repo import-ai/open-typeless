@@ -130,7 +130,7 @@ export function MainWindow() {
     setStatus('正在完成识别…')
     try {
       const result = await commands.transcribe(file)
-      if (epoch.current === current) setStatus([result.text || '未识别到文字', ...result.warnings].join('\n'))
+      if (epoch.current === current) setStatus([result.text ? '' : '未识别到文字', ...result.warnings].filter(Boolean).join('\n') || '就绪')
     } catch (error) {
       if (epoch.current === current) setStatus(String(error))
     } finally { if (epoch.current === current) reset() }
@@ -243,10 +243,6 @@ export function MainWindow() {
         : '应用会保留在 Dock 中；关闭主窗口后，可从 Dock 重新打开。'
 
   return <main className="mx-auto flex max-w-xl flex-col gap-5 p-6">
-    <header>
-      <h1 className="text-xl font-semibold tracking-tight">Open Typeless</h1>
-      <p className="mt-1 text-sm text-muted-foreground">{navigator.userAgent.includes('Mac') ? '按键盘快捷键开始 / 完成录音；遥控器语音键按住说话、松开识别。' : '按快捷键开始录音，再按一次完成输入。'}</p>
-    </header>
     <Tabs.Root defaultValue="voice" className="space-y-5">
     <Tabs.List aria-label="主导航" className="grid grid-cols-4 rounded-lg bg-muted p-1">
       <Tabs.Trigger value="voice" className="rounded-md px-3 py-1.5 text-sm text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm">语音输入</Tabs.Trigger>
@@ -275,7 +271,6 @@ export function MainWindow() {
           </span>
         </div>
         {remoteStatus && <p role="status" className="text-xs text-muted-foreground">{remoteStatus}</p>}
-        <p role="status" className="max-h-24 min-h-5 overflow-y-auto whitespace-pre-wrap break-words text-sm text-muted-foreground">{phase === 'idle' ? idleStatus : status}</p>
       </CardContent>
     </Card>
     <InsightsPanel />
@@ -310,6 +305,7 @@ export function MainWindow() {
         onSave={() => { void saveBackend() }}
         onInputActiveChange={onBackendInputActiveChange}
       />
+      <p role="status" className="max-h-24 min-h-5 overflow-y-auto whitespace-pre-wrap break-words text-sm text-muted-foreground">{phase === 'idle' ? idleStatus : status}</p>
       <section className="space-y-3" aria-labelledby="presence-label">
         <h2 id="presence-label" className="text-sm font-medium">应用入口</h2>
         <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
