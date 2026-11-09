@@ -343,7 +343,7 @@ The client streams PCM during recording when the health check advertises streami
 
 Shortcut capture starts only when the input itself is clicked. Press the desired keys and release them to apply the shortcut without a save button. Ordinary single keys and standalone left/right Command, Ctrl, Shift, and Alt are supported, as are modifier-plus-key combinations. Click elsewhere to cancel capture. Esc can also be the activation key, but it still cancels recognition while the pill is visible. Recording is disabled until the backend URL is configured. Regular `tauri dev` does not show developer options.
 
-Settings are restored at startup. An empty backend URL produces an unconfigured-backend status; otherwise the client requests `<base_url>/health` and reports ready only after a successful check. Health is checked again every 30 seconds while idle and before each recording.
+Settings are restored at startup. The Settings tab shows connection and recording status below the backend fields. An empty backend URL produces an unconfigured-backend status; otherwise the client requests `<base_url>/health` and reports ready only after a successful check. Health is checked again every 30 seconds while idle and before each recording.
 
 ## Settings and dictionary persistence
 
