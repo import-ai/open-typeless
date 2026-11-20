@@ -2,9 +2,11 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rerun-if-changed=src/remote_microphone.m");
         println!("cargo:rerun-if-changed=src/permissions.m");
+        println!("cargo:rerun-if-changed=src/pasteboard.m");
         cc::Build::new()
             .file("src/remote_microphone.m")
             .file("src/permissions.m")
+            .file("src/pasteboard.m")
             .flag("-fobjc-arc")
             .compile("remote_microphone");
         for framework in ["CoreBluetooth", "Foundation", "IOKit", "ApplicationServices", "AppKit", "AVFoundation"] {
