@@ -345,6 +345,21 @@ fn main() {
             app.manage(HistoryState::new(config_directory(app.handle()).and_then(|path| history::Store::open(&path))));
             setup_tray(app)?;
             apply_presence(app.handle())?;
+            #[cfg(target_os = "macos")]
+            if let Some(pill) = app.get_webview_window("pill") {
+                use objc2_app_kit::{NSStatusWindowLevel, NSWindow, NSWindowCollectionBehavior};
+
+                // Tauri setup runs on the main thread and the webview owns this NSWindow.
+                let window = unsafe { &*pill.ns_window()?.cast::<NSWindow>() };
+                let mut behavior = window.collectionBehavior()
+                    | NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary;
+                if objc2::available!(macos = 13.0) {
+                    behavior |= NSWindowCollectionBehavior::CanJoinAllApplications;
+                }
+                window.setCollectionBehavior(behavior);
+                window.setLevel(NSStatusWindowLevel);
+            }
             position_pill(app.handle())?;
             permissions::request_startup_permissions(app.handle())?;
             Ok(())
@@ -1049,6 +1064,16 @@ fn show_pill(app: &AppHandle) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     if let Some(window) = app.get_webview_window("pill") {
+        #[cfg(target_os = "macos")]
+        {
+            let _main_thread = objc2::MainThreadMarker::new()
+                .ok_or("The pill must be shown on the main thread")?;
+            let native = window.ns_window().map_err(|e| e.to_string())?;
+            // The webview owns this NSWindow for the duration of the call.
+            let native = unsafe { &*native.cast::<objc2_app_kit::NSWindow>() };
+            native.orderFrontRegardless();
+        }
+        #[cfg(not(target_os = "macos"))]
         window.show().map_err(|e| e.to_string())?;
     }
     app.emit("pill-shown", ()).map_err(|e| e.to_string())?;
