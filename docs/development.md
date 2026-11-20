@@ -373,6 +373,16 @@ The calendar shows the current month and five preceding months, using local cale
 
 Validate with `npm run build`, `node --experimental-strip-types --test tests/*.test.mjs`, and `cargo test --locked` from `tauri-client/`. Native checks must cover the 420px window, recording/recognition cancellation, clipboard/paste failure, file reveal, deletion/restart, and pill focus/transparency on macOS and Windows.
 
+On macOS, automatic paste restores the original pasteboard items after a short delay if the pasteboard change count still matches the temporary write. To check the native pasteboard behavior without touching the system clipboard, run from `tauri-client/`:
+
+```sh
+clang -Wall -Wextra -Werror -fobjc-arc -framework AppKit \
+  tests/pasteboard.test.m -o /tmp/open-typeless-pasteboard-test
+/tmp/open-typeless-pasteboard-test
+```
+
+For an end-to-end check, copy an image, dictate into a target application, then paste manually to confirm that the original image is available.
+
 ## Application icons
 
 `tauri-client/icons/icon.svg` is the single source for the application icon, with separate background, waveform, and cat-head groups. `tauri dev`, `tauri build`, and GitHub desktop builds generate PNG, macOS ICNS, and Windows ICO files in the ignored `tauri-client/icons/generated/` directory. All packaging configuration uses these generated files. Run `npm run generate:icons` from `tauri-client/` to generate them separately; also do this before running Cargo builds or tests directly. Old PNGs, design variants, and historical exports are kept in the local `docs/archive/icons/` directory (not tracked by Git) and do not participate in builds.

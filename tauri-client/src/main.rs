@@ -1588,9 +1588,21 @@ async fn transcribe_file(app: AppHandle, file: RecordingFile) -> Result<Transcri
                 // run, so a delayed reply can never paste into a newer session.
                 let state = paste_app.state::<AppState>();
                 with_current_run(&state.active, &paste_run, || {
-                    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-                    clipboard.set_text(text).map_err(|e| e.to_string())?;
                     let mut enigo = enigo::Enigo::new(&enigo::Settings::default())
+                        .map_err(|e| e.to_string())?;
+                    #[cfg(target_os = "macos")]
+                    {
+                        extern "C" {
+                            fn ot_write_temporary_paste_text(bytes: *const u8, length: usize) -> bool;
+                        }
+                        // This closure runs on the main thread and AppKit copies the UTF-8 bytes.
+                        if !unsafe { ot_write_temporary_paste_text(text.as_ptr(), text.len()) } {
+                            return Err("无法安全地临时写入剪贴板".into());
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    arboard::Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.set_text(text))
                         .map_err(|e| e.to_string())?;
                     use enigo::{Direction, Key, Keyboard};
                     let modifier = if cfg!(target_os = "macos") {
